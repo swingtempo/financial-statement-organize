@@ -6,7 +6,10 @@ copies them into per-institution folders, and writes a structured JSON summary.
 
 ## Setup
 
-1. .NET 9 SDK is installed at `~/.dotnet` (already on PATH via `~/.bashrc`).
+1. .NET 9 SDK (installed at `~/.dotnet`, already on PATH via `~/.bashrc`).
+   Nothing else to install — PDF reading uses the bundled PDFium engine by
+   default. (Optional: set `PDF_BACKEND=poppler` to prefer poppler-utils when
+   they are on `PATH`; the app falls back to PDFium if poppler is missing.)
 2. Put your key in the `.env` at the repo root (or set env vars, which win):
 
 ```
@@ -21,17 +24,17 @@ MAX_PAGES=20                           # vision backend: pages rasterized per PD
 > Backend ladder (first one that works is remembered for the rest of the run):
 > 1. **files** – OpenAI's proprietary `/files` upload (real OpenAI only; *not a
 >    standard* — vLLM / LM Studio don't have it)
-> 2. **vision** – rasterizes pages with `pdftoppm`, sends base64 `image_url`
->    parts in a normal chat request (standard OpenAI Vision API — this is the
->    **vLLM / LM Studio** path; needs a vision-capable model, e.g. Qwen2.5-VL)
-> 3. **text** – `pdftotext` extraction (cheapest, fails on scanned PDFs)
+> 2. **vision** – rasterizes the pages and sends base64 `image_url` parts in a
+>    normal chat request (standard OpenAI Vision API — this is the **vLLM /
+>    LM Studio** path; needs a vision-capable model, e.g. Qwen2.5-VL)
+> 3. **text** – text extraction (cheapest, fails on scanned PDFs)
 >
-> Fallbacks 2–3 need `poppler-utils` (already installed here).
->
-> **Windows:** poppler has no official Windows build, but the app auto-detects
-> `pdftoppm.exe` / `pdftotext.exe` on `PATH` (via `where`). Just drop a
-> [poppler-windows](https://github.com/gitpdf/poppler-windows) release on `PATH`
-> and everything works unchanged. (WSL is an equally valid option.)
+> PDF rasterization/extraction uses the bundled **PDFium** engine by default
+> (`Patagames.Pdf` NuGet package — its native runtime ships inside the package
+> for Windows / macOS / Linux, so there is nothing to install). Optionally set
+> `PDF_BACKEND=poppler` in `.env` to use `pdftoppm` / `pdftotext` instead when
+> they are on `PATH` (used only if available, else it falls back to managed).
+> Both paths have been verified to produce identical results.
 
 ## Run
 

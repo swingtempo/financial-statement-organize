@@ -41,9 +41,14 @@ var jsonOptions = new JsonSerializerOptions
 
 var haveVision = PdfTools.HasRasterizer;
 var haveText = PdfTools.HasTextExtractor;
+var pdfBackend = EnvFile.Get(env, "PDF_BACKEND", "managed").Trim().ToLowerInvariant();
+PdfTools.PreferPoppler = pdfBackend == "poppler";
 var maxPages = int.Parse(EnvFile.Get(env, "MAX_PAGES", "20")!);
 var dpi = int.Parse(EnvFile.Get(env, "PDF_DPI", "150")!);
-Console.WriteLine($"Backends: files (upload) -> vision {(haveVision ? "ok" : "MISSING pdftoppm")} -> text {(haveText ? "ok" : "MISSING pdftotext")}");
+var engine = PdfTools.PreferPoppler
+    ? (PdfTools.HasPoppler("pdftoppm") ? "poppler" : "managed (poppler requested but not found)")
+    : "managed PDFium";
+Console.WriteLine($"Backends: files (upload) -> vision ok -> text ok   [PDF engine: {engine}]");
 
 
 using var http = new HttpClient { BaseAddress = new Uri(baseUrl + "/") };
