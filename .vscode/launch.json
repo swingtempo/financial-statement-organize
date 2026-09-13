@@ -1,0 +1,34 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "StatementOrganizer",
+            "type": "coreclr",
+            "request": "launch",
+            "preLaunchTask": "build",
+            "program": "${workspaceFolder}/StatementOrganizer/bin/Debug/net9.0/StatementOrganizer.dll",
+            "args": [],
+            "cwd": "${workspaceFolder}/StatementOrganizer",
+            "stopAtEntry": false,
+            "console": "internalConsole",
+            "env": {
+                "DOTNET_ROOT": "${env:HOME}/.dotnet"
+            },
+            "envFile": "${workspaceFolder}/.env"
+        },
+        {
+            "name": "StatementOrganizer (no build)",
+            "type": "coreclr",
+            "request": "launch",
+            "program": "${workspaceFolder}/StatementOrganizer/bin/Debug/net9.0/StatementOrganizer.dll",
+            "args": [],
+            "cwd": "${workspaceFolder}/StatementOrganizer",
+            "stopAtEntry": false,
+            "console": "internalConsole",
+            "env": {
+                "DOTNET_ROOT": "${env:HOME}/.dotnet"
+            },
+            "envFile": "${workspaceFolder}/.env"
+        }
+    ]
+}

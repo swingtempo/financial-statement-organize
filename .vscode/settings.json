@@ -1,0 +1,7 @@
+{
+    // The C# extension runs `dotnet` via /bin/sh, which doesn't see ~/.dotnet.
+    // Tell it where the SDK lives (works with both the classic C# extension
+    // and C# Dev Kit).
+    "dotnet.root": "/home/jongg/.dotnet",
+    "CSharpExt.dotnetPath": "/home/jongg/.dotnet/dotnet"
+}
