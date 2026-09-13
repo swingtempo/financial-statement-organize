@@ -1,0 +1,11 @@
+# .NET
+bin/
+obj/
+*.user
+
+# env
+.env
+
+# app data
+input/
+organized/
