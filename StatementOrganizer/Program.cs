@@ -39,10 +39,11 @@ var jsonOptions = new JsonSerializerOptions
     WriteIndented = true,
 };
 
-var havePdftoppm = ToolExists("pdftoppm");
-var havePdftotext = ToolExists("pdftotext");
+var haveVision = PdfTools.HasRasterizer;
+var haveText = PdfTools.HasTextExtractor;
 var maxPages = int.Parse(EnvFile.Get(env, "MAX_PAGES", "20")!);
-Console.WriteLine($"Backends: files (upload) -> vision {(havePdftoppm ? "ok" : "MISSING pdftoppm")} -> text {(havePdftotext ? "ok" : "MISSING pdftotext")}");
+var dpi = int.Parse(EnvFile.Get(env, "PDF_DPI", "150")!);
+Console.WriteLine($"Backends: files (upload) -> vision {(haveVision ? "ok" : "MISSING pdftoppm")} -> text {(haveText ? "ok" : "MISSING pdftotext")}");
 
 
 using var http = new HttpClient { BaseAddress = new Uri(baseUrl + "/") };
@@ -75,7 +76,7 @@ foreach (var pdf in pdfFiles)
     var record = new StatementFile { FileName = name };
     try
     {
-        var json = await ClassifyWithLlm(http, model, pdf, name, maxPages, havePdftoppm, havePdftotext, backendState);
+        var json = await ClassifyWithLlm(http, model, pdf, name, maxPages, dpi, haveVision, haveText, backendState);
         var parsed = JsonSerializer.Deserialize<StatementFile>(json, jsonOptions);
         if (parsed is null || parsed.Statements is null)
             throw new Exception("LLM returned empty or malformed JSON.");
@@ -169,7 +170,7 @@ static string BuildPrompt(string fileName, string source) =>
 
 static async Task<string> ClassifyWithLlm(
     HttpClient http, string model, string pdfPath, string fileName,
-    int maxPages, bool canVision, bool canText, string[] backendState)
+    int maxPages, int dpi, bool canVision, bool canText, string?[] backendState)
 {
     var order = new List<string> { "files" };
     if (canVision) order.Add("vision");
@@ -184,7 +185,7 @@ static async Task<string> ClassifyWithLlm(
             var json = mode switch
             {
                 "files" => await CallWithPdfFile(http, model, pdfPath, fileName),
-                "vision" => await CallWithVision(http, model, pdfPath, fileName, maxPages),
+                "vision" => await CallWithVision(http, model, pdfPath, fileName, maxPages, dpi),
                 _ => await CallWithText(http, model, pdfPath, fileName),
             };
             backendState[0] = mode;
@@ -238,51 +239,27 @@ static async Task<string> CallWithPdfFile(HttpClient http, string model, string 
 
 // Backend 2: standard OpenAI Vision API - rasterize pages, send base64 image parts.
 // This is the vLLM / LM Studio path (any vision-capable OpenAI-compatible server).
-static async Task<string> CallWithVision(HttpClient http, string model, string pdfPath, string fileName, int maxPages)
+static async Task<string> CallWithVision(HttpClient http, string model, string pdfPath, string fileName, int maxPages, int dpi)
 {
-    var work = Directory.CreateTempSubdirectory("stmt-");
-    try
-    {
-        // pdftoppm -png -r 150 in.pdf prefix -> prefix-1.png, prefix-2.png, ...
-        var prefix = work.FullName + "/page";
-        var psi = new ProcessStartInfo("pdftoppm", $"-png -r 150 -f 1 -l {maxPages} \"{pdfPath}\" \"{prefix}\"")
-        { RedirectStandardError = true };
-        using var proc = Process.Start(psi)!;
-        var err = await proc.StandardError.ReadToEndAsync();
-        await proc.WaitForExitAsync();
-        if (proc.ExitCode != 0) throw new Exception($"pdftoppm failed: {Truncate(err, 200)}");
+    var pages = PdfTools.Rasterize(pdfPath, dpi, maxPages);
+    if (pages.Count == 0) throw new Exception("no pages rasterized");
 
-        var pages = Directory.EnumerateFiles(work.FullName, "*.png").OrderBy(p => p).ToList();
-        if (pages.Count == 0) throw new Exception("pdftoppm produced no pages");
-
-        var parts = new List<object>
-        {
-            new { type = "text", text = BuildPrompt(fileName, "vision") },
-        };
-        foreach (var page in pages)
-        {
-            var b64 = Convert.ToBase64String(File.ReadAllBytes(page));
-            parts.Add(new { type = "image_url", image_url = new { url = $"data:image/png;base64,{b64}" } });
-        }
-        return await SendChatAsync(http, model, parts.ToArray());
-    }
-    finally
+    var parts = new List<object>
     {
-        try { work.Delete(recursive: true); } catch { /* best effort */ }
+        new { type = "text", text = BuildPrompt(fileName, "vision") },
+    };
+    foreach (var (name, png) in pages)
+    {
+        var b64 = Convert.ToBase64String(png);
+        parts.Add(new { type = "image_url", image_url = new { url = $"data:image/png;base64,{b64}" } });
     }
+    return await SendChatAsync(http, model, parts.ToArray());
 }
 
 // Backend 3: plain text extraction via pdftotext (cheapest; fails on scanned PDFs).
 static async Task<string> CallWithText(HttpClient http, string model, string pdfPath, string fileName)
 {
-    var psi = new ProcessStartInfo("pdftotext", $"-layout \"{pdfPath}\" -")
-    { RedirectStandardOutput = true, RedirectStandardError = true };
-    using var proc = Process.Start(psi)!;
-    var text = (await proc.StandardOutput.ReadToEndAsync()).Trim();
-    var err = await proc.StandardError.ReadToEndAsync();
-    await proc.WaitForExitAsync();
-    if (string.IsNullOrWhiteSpace(text))
-        throw new Exception("pdftotext extracted no text (scanned PDF?)" + (err.Length > 0 ? $" - {Truncate(err, 160)}" : ""));
+    var text = PdfTools.ExtractText(pdfPath);
     if (text.Length > 120_000) text = text[..120_000];
 
     return await SendChatAsync(http, model, new object[]
@@ -313,20 +290,6 @@ static async Task<string> SendChatAsync(HttpClient http, string model, object[] 
     if (start < 0 || end <= start)
         throw new Exception("LLM response did not contain a JSON object.");
     return raw[start..(end + 1)];
-}
-
-static bool ToolExists(string tool)
-{
-    try
-    {
-        var psi = new ProcessStartInfo("sh", new[] { "-c", $"command -v {tool}" });
-        psi.RedirectStandardOutput = true;
-        using var proc = Process.Start(psi)!;
-        var outp = proc.StandardOutput.ReadToEnd().Trim();
-        proc.WaitForExit(5000);
-        return outp.Length > 0;
-    }
-    catch { return false; }
 }
 
 static async Task EnsureSuccessAsync(HttpResponseMessage resp, string what)
