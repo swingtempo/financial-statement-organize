@@ -27,6 +27,11 @@ MAX_PAGES=20                           # vision backend: pages rasterized per PD
 > 3. **text** – `pdftotext` extraction (cheapest, fails on scanned PDFs)
 >
 > Fallbacks 2–3 need `poppler-utils` (already installed here).
+>
+> **Windows:** poppler has no official Windows build, but the app auto-detects
+> `pdftoppm.exe` / `pdftotext.exe` on `PATH` (via `where`). Just drop a
+> [poppler-windows](https://github.com/gitpdf/poppler-windows) release on `PATH`
+> and everything works unchanged. (WSL is an equally valid option.)
 
 ## Run
 

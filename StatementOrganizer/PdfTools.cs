@@ -73,8 +73,11 @@ public static class PdfTools
     {
         try
         {
-            var psi = new ProcessStartInfo("sh", new[] { "-c", $"command -v {tool}" });
-            psi.RedirectStandardOutput = true;
+            // Windows: `where` finds pdftoppm.exe / pdftotext.exe on PATH.
+            // POSIX:   sh -c "command -v ..."
+            var psi = OperatingSystem.IsWindows()
+                ? new ProcessStartInfo("where", $"{tool} {tool}.exe") { RedirectStandardOutput = true }
+                : new ProcessStartInfo("sh", new[] { "-c", $"command -v {tool}" }) { RedirectStandardOutput = true };
             using var proc = Process.Start(psi) ?? throw new Exception();
             var outp = proc.StandardOutput.ReadToEnd().Trim();
             proc.WaitForExit(5000);
