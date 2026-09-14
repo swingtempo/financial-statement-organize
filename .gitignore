@@ -3,6 +3,28 @@ bin/
 obj/
 *.user
 
+# Visual Studio
+.vs/
+*.suo
+*.sln.docstates
+*.DotSettings.user
+[Dd]ebug/
+[Dd]ebugPublic/
+[Rr]elease/
+[Rr]eleases/
+x64/
+x86/
+build/
+bld/
+TestResults/
+*.VC.db
+*.sdf
+*.aps
+*.cachefile
+**/[Bb]in
+**/[Oo]bj
+**/[Pp]ackages
+
 # env
 .env
 
