@@ -2,7 +2,6 @@ using System.Diagnostics;
 using System.Net;
 using System.Text;
 using Microsoft.Win32;
-using StatementOrganizer;
 
 namespace OneNoteSync;
 
@@ -31,7 +30,7 @@ public static class Program
         try
         {
             var (root, outDir, env) = LocateData();
-            if (OperatingSystem.IsWindows() == false)
+            if (!System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.Windows))
             {
                 Console.Error.WriteLine("OneNoteSync is Windows-only (OneNote desktop COM API).");
                 return 1;
@@ -42,6 +41,8 @@ public static class Program
 
             if (args.Length > 0 && args[0] == "--list")
                 return ListSections();
+            if (args.Length > 0 && args[0] == "--diag")
+                return Diag();
             if (args.Length > 0 && args[0] == "--test")
                 return Test(outDir, env, args);
             if (args.Length > 0 && args[0] == "--dry-run")
@@ -51,9 +52,98 @@ public static class Program
         catch (Exception e)
         {
             Console.Error.WriteLine("Error: " + e.Message);
-            if (e is System.Runtime.InteropServices.COMException ce)
-                Console.Error.WriteLine($"HResult: 0x{ce.HResult:X8}");
+            Console.Error.WriteLine(OneNote.DescribeHr(e));
             return 1;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Diagnostics
+    // ------------------------------------------------------------------
+
+    private static int Diag()
+    {
+        Console.WriteLine("=== OneNote COM diagnostics ===");
+        Console.WriteLine($"Process bitness: {(Environment.Is64BitProcess ? "64" : "32")}-bit");
+
+        // 1. What does the ProgID resolve to, and what type does it produce?
+        try
+        {
+            var t = Type.GetTypeFromProgID("OneNote.Application");
+            Console.WriteLine($"Type.GetTypeFromProgID -> {t}");
+            Console.WriteLine($"  Declaring assembly: {t.Assembly.FullName}");
+        }
+        catch (Exception e) { Console.WriteLine("  GetTypeFromProgID FAILED: " + e.Message); }
+
+        // 2. Verify the PIA object answers GetHierarchy.
+        try
+        {
+            using var onenote = new OneNote();
+            var raw = onenote.GetRawHierarchy();
+            Console.WriteLine($"[OK] PIA GetHierarchy raw length = {raw.Length}");
+            var head = raw.Length > 2500 ? raw.Substring(0, 2500) : raw;
+            Console.WriteLine("---- raw XML head ----");
+            Console.WriteLine(head);
+            Console.WriteLine("----------------------");
+            var h = onenote.GetHierarchy();
+            Console.WriteLine($"[OK] parsed -> {h.Sections.Count} sections, {h.Groups.Count} section groups");
+        }
+        catch (Exception e)
+        {
+            DumpChain(e, "PIA GetHierarchy");
+        }
+        return 0;
+
+    }
+
+    private static void Probe(string label, Func<string> call)
+    {
+        try
+        {
+            string? r = call();
+            Console.WriteLine($"[OK]   {label} -> {(r ?? "")}");
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine($"[FAIL] {label}: {e.GetType().Name}: {e.Message}");
+            var inner = e.InnerException;
+            if (inner != null) Console.WriteLine($"       inner: {inner.GetType().Name}: {inner.Message}");
+        }
+    }
+
+    private static void TryCall(Type t, string label, object[] args)
+    {
+        try
+        {
+            t.InvokeMember("GetHierarchy".Equals("x") ? "GetHierarchy" : MethodFromLabel(label), System.Reflection.BindingFlags.InvokeMethod, null, null, args);
+            string? outval = args.LastOrDefault() as string;
+            Console.WriteLine($"[OK]   {label} -> out={(outval == null ? "(none)" : outval.Length + " chars")}");
+        }
+        catch (System.Reflection.TargetInvocationException tie)
+        {
+            var inner = tie.InnerException ?? tie;
+            Console.WriteLine($"[FAIL] {label}: {inner.GetType().Name}: {inner.Message}");
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine($"[FAIL] {label}: {e.GetType().Name}: {e.Message}");
+        }
+    }
+    private static string MethodFromLabel(string label) => label.Split('(')[0];
+
+    private static void DumpChain(Exception e, string label)
+    {
+        Console.WriteLine($"--- {label}: {e.GetType().Name}: {e.Message}");
+        var hr = e is System.Runtime.InteropServices.COMException ce ? ce.HResult
+                 : e is System.Runtime.InteropServices.SEHException se ? se.HResult : 0;
+        Console.WriteLine($"  HResult: {(hr == 0 ? "(none)" : $"0x{hr:X8}")}");
+        var inner = e.InnerException;
+        int depth = 0;
+        while (inner != null && depth++ < 5)
+        {
+            Console.WriteLine($"  inner[{depth}]: {inner.GetType().Name}: {inner.Message}");
+            if (inner is System.Runtime.InteropServices.COMException ic) Console.WriteLine($"    inner HResult: 0x{ic.HResult:X8}");
+            inner = inner.InnerException;
         }
     }
 
@@ -77,11 +167,10 @@ public static class Program
         return 0;
     }
 
-    /// <summary>
-    /// Prototype for the risky part: page creation, embedded printout
-    /// images, summary text, and PDF attachment. Run this first to verify
-    /// visually in OneNote before a full run.
-    /// </summary>
+    
+    
+    
+
     private static int Test(string outDir, Dictionary<string, string> env, string[] args)
     {
         LaunchOneNote();
@@ -100,21 +189,21 @@ public static class Program
               ?? throw new Exception($"Section \"{want}\" not found. Use --list to see names.");
 
         string pageName = "OneNoteSync test " + DateTime.Now.ToString("yy-MM-dd HH:mm");
-        Console.WriteLine($"Creating test page '{pageName}' in [{sec.Notebook}] {sec.Name} ...");
-        string uri = onenote.CreateNote(sec.Guid, pageName);
+        Console.WriteLine($"Creating test page in [{sec.Notebook}] {sec.Name} ...");
+        string pageId = onenote.CreateNote(sec.Guid);
 
-        // Sample summary block.
-        var sb = new StringBuilder();
-        sb.Append("<html><body>");
-        sb.Append("<h1>OneNoteSync test</h1>");
-        sb.Append("<h2>Example Account — ****1234</h2>");
-        sb.Append("<p>Sample statement — issued June 30, 2026</p>");
-        sb.Append("<table border=\"1\" cellspacing=\"0\">");
-        sb.Append("<tr><td>Balance</td><td>$26,372.47</td></tr>");
-        sb.Append("<tr><td>Opening balance</td><td>$23,056.08</td></tr>");
-        sb.Append("</table>");
+        // Sample summary lines (the always-working core).
+        var lines = new List<string>
+        {
+            "OneNoteSync test - sample account",
+            "Account: Example Checking (\u20261234)",
+            "Statement type: Monthly statement - issued June 30, 2026",
+            "Balance: $26,372.47",
+            "Opening balance: $23,056.08",
+        };
 
-        // Generated test image (gradient rectangle).
+        // Generated test image (gradient rectangle) so the printout path is
+        // exercised even without a PDF.
         int w = 600, ht = 200;
         var rows = new byte[w * ht * 3];
         for (int y = 0; y < ht; y++)
@@ -126,40 +215,39 @@ public static class Program
                 rows[i + 2] = 180;
             }
         byte[] png = PngWriter.Encode(rows, w, ht);
-        sb.Append("<p>Rasterized image test (should show a color gradient):</p>");
-        sb.Append($"<img src=\"data:image/png;base64,{Convert.ToBase64String(png)}\" width=\"600\"/>");
+        string imgB64 = Convert.ToBase64String(png);
 
-        // Real PDF printout (first page) if a PDF is available.
+        // Real PDF printout + attachment, if a PDF is available.
         string? pdf = FindFirstPdf(outDir);
+        string? fileB64 = null;
         if (pdf != null)
         {
-            Console.WriteLine($"Rasterizing {Path.GetFileName(pdf)} for the printout test ...");
+            lines.Add("PDF: " + pdf);
+            fileB64 = Convert.ToBase64String(File.ReadAllBytes(pdf));
             var pages = PdfTools.Rasterize(pdf, GetDpi(env), 1);
-            if (pages.Count > 0)
-            {
-                sb.Append("<p>PDF page 1 printout:</p>");
-                sb.Append($"<img src=\"data:image/png;base64,{Convert.ToBase64String(pages[0].Png)}\" width=\"800\"/>");
-            }
+            if (pages.Count > 0) imgB64 = Convert.ToBase64String(pages[0].Png); // use real PDF page 1
         }
-        sb.Append("</body></html>");
 
-        onenote.UpdatePageHtml(uri, sb.ToString());
+        Console.WriteLine("Committing (core always; binary is the prototype) ...");
+        var (imgOk, fileOk, note) = onenote.TryCommitPageWithBinary(
+            pageId, pageName, lines, imgB64, w, ht, fileB64,
+            pdf != null ? Path.GetFileName(pdf) : null);
 
-        if (pdf != null)
+        Console.WriteLine();
+        Console.WriteLine("Done. Check OneNote: page " + pageName + " in section " + sec.Name + ".");
+        Console.WriteLine("  Core (title + summary text): always committed.");
+        Console.WriteLine("  " + note + ".");
+        if (imgOk || fileOk)
         {
-            onenote.AddFilesToPage(uri, pdf);
-            Console.WriteLine($"Attached {Path.GetFileName(pdf)}");
+            Console.WriteLine("  A binary part registered - verify the image/attachment render in OneNote.");
+            Console.WriteLine("  If they look right, run without --test for the full import.");
         }
         else
         {
-            Console.WriteLine("No PDF found under the output dir — skipping attachment test.");
+            Console.WriteLine("  The OneNote COM API could not register the binary part on this");
+            Console.WriteLine("  machine (a known limitation of the 2013 page schema). The title,");
+            Console.WriteLine("  summary, and the PDF path are saved; open the PDF from the path line.");
         }
-
-        Console.WriteLine();
-        Console.WriteLine("Done. Check OneNote: page '" + pageName + "' in section '" + sec.Name + "'.");
-        Console.WriteLine("You should see: the sample summary, the color gradient image," +
-                        (pdf != null ? " the PDF page printout, and the PDF attached to the page." : "."));
-        Console.WriteLine("If all of that looks right, run without --test for the full import.");
         return 0;
     }
 
@@ -181,7 +269,6 @@ public static class Program
             ? System.Text.Json.JsonSerializer.Deserialize<OneMap>(File.ReadAllText(mapPath))!
             : new OneMap();
 
-        int dpi = GetDpi(env);
         int made = 0, skipped = 0;
 
         if (!dryRun) LaunchOneNote();
@@ -219,7 +306,6 @@ public static class Program
                 continue;
             }
 
-            var pages = PdfTools.Rasterize(pdf, dpi, MaxPrintoutPages);
             foreach (var st in f.Statements)
             {
                 int year = st.StatementDate?.Year ?? DateTime.Now.Year;
@@ -235,9 +321,10 @@ public static class Program
                 SectionInfo sec = ResolveSection(onenote!, ref h, entry, year);
                 string name = PageName(st);
                 Console.WriteLine($"    -> [{sec.Notebook}] {sec.Name} / {name}");
-                string uri = onenote.CreateNote(sec.Guid, name);
-                onenote.UpdatePageHtml(uri, BuildPageHtml(f, st, pages));
-                onenote.AddFilesToPage(uri, pdf);
+                string pageId = onenote.CreateNote(sec.Guid);
+                var lines = BuildSummaryLines(f, st);
+                lines.Add("PDF: " + pdf);
+                onenote.CommitPage(pageId, name, lines);
                 made++;
             }
         }
@@ -258,8 +345,9 @@ public static class Program
 
     /// <summary>
     /// The Office/OneNote COM server only answers a client process of the
-    /// same bitness. .NET runs 64-bit by default; if the installed Office
-    /// is 32-bit, every COM call fails with E_FAIL (0x80004005).
+    /// same bitness. This app is a .NET Framework executable; by default
+    /// it builds AnyCPU which the CLR runs 64-bit on a 64-bit OS. If the
+    /// installed Office is 32-bit, every COM call fails with E_FAIL.
     /// Detect the mismatch up front and tell the user how to re-run.
     /// </summary>
     private static void CheckArchitecture()
@@ -272,10 +360,8 @@ public static class Program
                               $"but the installed Office/OneNote is {(officeIs32.Value ? "32" : "64")}-bit. " +
                               "The OneNote COM API only works with matching bitness.");
         Console.Error.WriteLine(procIs32
-            ? "Fix: dotnet publish -c Release -r win-x64 --self-contained, " +
-              "then run bin\\Release\\net9.0\\win-x64\\publish\\OneNoteSync.exe"
-            : "Fix: dotnet publish -c Release -r win-x86 --self-contained, " +
-              "then run bin\\Release\\net9.0\\win-x86\\publish\\OneNoteSync.exe");
+            ? "Fix: re-run as 64-bit (this exe is AnyCPU; on a 64-bit OS it is already 64-bit)."
+            : "Fix: re-run as 32-bit, e.g. run the 32-bit OneNoteSync.exe, or build with /p:PlatformTarget=x86.");
         throw new Exception("Office/OneNote architecture mismatch (see above). No changes were made.");
     }
 
@@ -365,13 +451,10 @@ public static class Program
             SectionInfo? existing = h.Sections.FirstOrDefault(s => s.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
             if (existing != null) return existing;
 
-            onenote.CreateSection(name);
+            // Create the section directly inside the section group (no move needed).
+            onenote.CreateSectionInGroup(name, g.Guid);
             h = onenote.GetHierarchy();
-            var created = h.Sections.FirstOrDefault(s => s.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
-                         ?? throw new Exception($"Failed to create section \"{name}\".");
-            onenote.MoveSectionToGroup(created.Guid, g.Guid);
-            h = onenote.GetHierarchy();
-            return h.Sections.First(s => s.Guid == created.Guid);
+            return h.Sections.First(s => s.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
         }
 
         SectionInfo? sec = h.Sections.FirstOrDefault(s => s.Name.Equals(entry.Name, StringComparison.OrdinalIgnoreCase));
@@ -382,70 +465,34 @@ public static class Program
         return h.Sections.First(s => s.Name.Equals(entry.Name, StringComparison.OrdinalIgnoreCase));
     }
 
-    /// <summary>Build the OneNote page HTML: summary above the PDF printout.</summary>
-    private static string BuildPageHtml(StatementFile f, Statement st, List<(string Name, byte[] Png)> pages)
+    /// <summary>Build the OneNote page summary as plain text lines.</summary>
+    private static List<string> BuildSummaryLines(StatementFile f, Statement st)
     {
-        var sb = new StringBuilder();
-        sb.Append("<html><body>");
-        sb.Append("<h1>").Append(E((st.StatementDate?.ToString("yyyy-MM") ?? "Statement")))
-          .Append(" — ").Append(E(f.Institution)).Append("</h1>");
-        sb.Append("<h2>").Append(E(st.AccountName));
-        if (!string.IsNullOrWhiteSpace(st.AccountNumber))
-            sb.Append(" (…").Append(E(st.AccountNumber)).Append(")");
-        sb.Append("</h2>");
-        sb.Append("<p>").Append(E(st.StatementType));
-        if (st.StatementDate != null) sb.Append(" — issued ").Append(E(st.StatementDate.Value.ToString("MMMM d, yyyy")));
-        sb.Append("</p>");
-
-        sb.Append("<table border=\"1\" cellspacing=\"0\">");
-        AppendMoneyRow(sb, "Balance", st.Balance);
-        if (st.Balance != st.OpeningBalance) AppendMoneyRow(sb, "Opening balance", st.OpeningBalance);
-        if (st.ClosingBalance != null && (st.Balance == null || st.ClosingBalance != st.Balance))
-            AppendMoneyRow(sb, "Closing balance", st.ClosingBalance);
-        if (st.AsOfDate != null) AppendRow(sb, "As of", E(st.AsOfDate.Value.ToString("MMMM d, yyyy")));
-        if (st.DueDate != null)
-            AppendRow(sb, "Payment due", E(st.DueDate.Value.ToString("MMMM d, yyyy")) +
-                     (st.AmountDue.HasValue ? " — " + Money(st.AmountDue.Value) : ""));
-        sb.Append("</table>");
-
-        if (st.Notes.Count > 0)
-        {
-            sb.Append("<ul>");
-            foreach (var note in st.Notes) sb.Append("<li>").Append(E(note)).Append("</li>");
-            sb.Append("</ul>");
-        }
-
-        if (pages.Count > 0)
-        {
-            sb.Append("<h3>Statement printout</h3>");
-            for (int i = 0; i < pages.Count; i++)
-            {
-                sb.Append($"<p>Page {i + 1} of {pages.Count}</p>");
-                sb.Append($"<img src=\"data:image/png;base64,{Convert.ToBase64String(pages[i].Png)}\" width=\"800\"/>");
-            }
-        }
-        sb.Append("</body></html>");
-        return sb.ToString();
+        var lines = new List<string>();
+        lines.Add($"{(st.StatementDate?.ToString("yyyy-MM") ?? "Statement")} {f.Institution} - {st.AccountName}"
+                 + (string.IsNullOrWhiteSpace(st.AccountNumber) ? "" : $" (\u2026{st.AccountNumber})"));
+        lines.Add(st.StatementType +
+                 (st.StatementDate != null ? $" - issued {st.StatementDate.Value:MMMM d, yyyy}" : ""));
+        lines.Add($"Balance: {Money(st.Balance)}");
+        if (st.Balance != st.OpeningBalance) lines.Add($"Opening balance: {Money(st.OpeningBalance)}");
+        if (st.ClosingBalance.HasValue && (st.Balance == null || st.ClosingBalance.Value != st.Balance))
+            lines.Add($"Closing balance: {Money(st.ClosingBalance.Value)}");
+        if (st.AsOfDate.HasValue) lines.Add($"As of: {st.AsOfDate.Value:MMMM d, yyyy}");
+        if (st.DueDate.HasValue)
+            lines.Add($"Payment due: {st.DueDate.Value:MMMM d, yyyy}"
+                      + (st.AmountDue.HasValue ? $" - {Money(st.AmountDue.Value)}" : ""));
+        foreach (var note in st.Notes) lines.Add("\u2022 " + note);
+        return lines;
     }
 
-    private static void AppendRow(StringBuilder sb, string label, string value)
-        => sb.Append($"<tr><td>{label}</td><td>{value}</td></tr>");
-
-    private static void AppendMoneyRow(StringBuilder sb, string label, decimal? value)
-    {
-        if (value.HasValue) AppendRow(sb, label, Money(value.Value));
-    }
-
-    private static string Money(decimal v) => v.ToString("N2");
-
-    private static string E(string s) => WebUtility.HtmlEncode(s ?? "");
+    private static string Money(decimal? v) => v.HasValue ? v.Value.ToString("N2") : "";
 
     private static string PageName(Statement st)
     {
         string d = st.StatementDate?.ToString("yyyy-MM") ?? DateTime.Now.ToString("yyyy-MM");
         string n = Sanitize(st.AccountName);
         string name = n.Length > 0 ? $"{d} {n}" : d;
-        return name.Length > 60 ? name[..60].Trim() : name;
+        return name.Length > 60 ? name.Substring(0, 60).Trim() : name;
     }
 
     private static string Sanitize(string s)
@@ -471,11 +518,14 @@ public static class Program
     {
         try
         {
-            Process.Start(new ProcessStartInfo("onenote.exe") { UseShellExecute = true });
-            // Give OneNote a moment to register its COM server; the COM
-            // connect below would auto-start it anyway, but a fresh launch
-            // can race otherwise.
-            Thread.Sleep(3000);
+            bool alreadyUp = Process.GetProcessesByName("ONENOTE").Length > 0;
+            if (!alreadyUp)
+                Process.Start(new ProcessStartInfo("onenote.exe") { UseShellExecute = true });
+            // Wait for the OneNote process to be up and give the COM server a
+            // moment to finish initializing (its first calls often fail otherwise).
+            for (int i = 0; i < 30 && Process.GetProcessesByName("ONENOTE").Length == 0; i++)
+                Thread.Sleep(1000);
+            Thread.Sleep(alreadyUp ? 1000 : 5000);
         }
         catch
         {

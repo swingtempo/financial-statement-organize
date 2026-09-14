@@ -2,15 +2,35 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net9.0</TargetFramework>
+    <TargetFramework>net48</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <Platforms>x64;x86</Platforms>
-    <Platform Condition="'$(Platform)' == ''">x64</Platform>
+    <LangVersion>latest</LangVersion>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <PIAPath>$(MSBuildProgramFiles32)\..\..\Windows\assembly\GAC_MSIL\Microsoft.Office.Interop.OneNote\15.0.0.0__71e9bce111e9429c\Microsoft.Office.Interop.OneNote.dll</PIAPath>
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="../StatementOrganizer/StatementOrganizer.csproj" />
+    <!-- .NET Framework 4.8 reference assemblies (no local targeting pack needed) -->
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" />
+    <!-- JSON (not in the net48 BCL) -->
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
+    <PackageReference Include="System.Memory" Version="4.5.5" />
+    <PackageReference Include="Microsoft.CSharp" Version="4.7.0" />
+    <!-- PDF rasterization (managed PDFium; ships the native win runtime; has a net48 build) -->
+    <PackageReference Include="Pdfium.Net.SDK" Version="5.1.3" />
+    <!-- The genuine OneNote COM interop (PIA). SDK projects don't search the GAC,
+         so point it at the GAC DLL where Office installs it. -->
+    <Reference Include="Microsoft.Office.Interop.OneNote">
+      <HintPath>$(PIAPath)</HintPath>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Late-bound OneNote page-writer helper (used when the PIA early-bound
+         UpdatePageContent overloads are misaligned). Copied next to the exe. -->
+    <None Include="OneNoteUpdate.ps1" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>
+
