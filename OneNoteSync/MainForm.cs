@@ -157,13 +157,17 @@ public sealed class MainForm : Form
         _colStatus = new DataGridViewTextBoxColumn { HeaderText = "Status", ReadOnly = true, FillWeight = 12 };
         _grid.Columns.AddRange(_colInst, _colTarget, _colKind, _colStatus);
         _grid.CellValueChanged += Grid_CellValueChanged;
-        _grid.DataError += (_, e) => { e.ThrowException = false; };
-        // Force the Target combo to commit the moment the user picks, so CellValueChanged
-        // fires reliably and the Status column updates immediately.
+        _grid.CellEndEdit += Grid_CellEndEdit;
+        _grid.CellValidating += Grid_CellValidating;
+        _grid.DataError += (_, e) => { e.ThrowException = false; LogGrid("DataError: " + (e.Exception?.Message ?? "?")); };
+        // DIAGNOSTIC only (no commit) — finding out why a pick from the dropdown
+        // does not stick. Logs the event; does not interfere with the grid.
         _grid.CurrentCellDirtyStateChanged += (_, __) =>
         {
-            if (_grid.IsCurrentCellDirty && _grid.CurrentCell?.OwningColumn.Index == _colTarget.Index)
-                _grid.CommitEdit(DataGridViewDataErrorContexts.Commit);
+            string colName = "?";
+            var c = _grid.CurrentCell;
+            if (c != null && c.OwningColumn != null) colName = c.OwningColumn.HeaderText ?? "?";
+            LogGrid($"CurrentCellDirtyStateChanged: IsCurrentCellDirty={_grid.IsCurrentCellDirty} col={colName}");
         };
 
         // Order matters for Dock layout: add Fill last, then bottom/top.
@@ -352,17 +356,70 @@ public sealed class MainForm : Form
         return list;
     }
 
+    /// <summary>
+    /// Normalize a Target cell value to a TargetOption. The combo cell can sometimes
+    /// hold the display string ("[SECTION] Name") instead of the TargetOption object
+    /// (a "value is not valid" state). A string is resolved back to a matching option
+    /// so the value is valid again and the mapping is preserved.
+    /// </summary>
+    private TargetOption? ResolveTarget(object? value)
+    {
+        if (value is TargetOption o) return o;
+        if (value is string s && s.Length > 0)
+        {
+            var all = BuildAllOptions();
+            // Match the display text ("[SECTION] Name" / "[GROUP]   Name").
+            foreach (var opt in all)
+                if (string.Equals(opt.ToString(), s, StringComparison.Ordinal))
+                    return opt;
+            // Fallback: the string is a bare name.
+            foreach (var opt in all)
+                if (string.Equals(opt.Name, s, StringComparison.OrdinalIgnoreCase))
+                    return opt;
+        }
+        return null;
+    }
+
+    private void Grid_CellEndEdit(object? sender, DataGridViewCellEventArgs e)
+    {
+        LogGrid($"CellEndEdit row={e.RowIndex} col={e.ColumnIndex} value={(e.RowIndex >= 0 ? (_grid.Rows[e.RowIndex].Cells[e.ColumnIndex].Value?.ToString() ?? "(null)") : "?")}");
+    }
+
+    private void Grid_CellValidating(object? sender, DataGridViewCellValidatingEventArgs e)
+    {
+        LogGrid($"CellValidating row={e.RowIndex} col={e.ColumnIndex} value={(e.RowIndex >= 0 ? (_grid.Rows[e.RowIndex].Cells[e.ColumnIndex].Value?.ToString() ?? "(null)") : "?")}");
+    }
+
     private void Grid_CellValueChanged(object? sender, DataGridViewCellEventArgs e)
     {
-        if (_updating || e.RowIndex < 0) return;
-        if (e.ColumnIndex == _colTarget.Index)
+        if (e.RowIndex < 0) return;
+        if (e.ColumnIndex != _colTarget.Index) return;
+        if (_updating) return; // prevent re-entrancy from our own writes
+
+        var raw = _grid.Rows[e.RowIndex].Cells[_colTarget.Index].Value;
+        if (raw is not TargetOption)
+            LogGrid($"[diag] row={e.RowIndex} Target value is NOT a TargetOption: type={(raw?.GetType().Name ?? "null")} text={(raw?.ToString() ?? "(null)")}");
+        var opt = ResolveTarget(raw);
+
+        _updating = true;
+        try
         {
-            var opt = _grid.Rows[e.RowIndex].Cells[_colTarget.Index].Value as TargetOption;
-            _updating = true;
+            // Self-heal: if the grid stored a display string, write back a real
+            // TargetOption so the value is valid again (fixes "value is not valid"
+            // and the empty Kind/Status).
+            if (raw is string && opt != null)
+                _grid.Rows[e.RowIndex].Cells[_colTarget.Index].Value = opt;
             _grid.Rows[e.RowIndex].Cells[_colKind.Index].Value = opt?.Kind ?? "";
             bool mapped = opt != null;
             _grid.Rows[e.RowIndex].Cells[_colStatus.Index].Value = mapped ? "mapped" : "UNMAPPED";
             _grid.Rows[e.RowIndex].DefaultCellStyle.BackColor = mapped ? Color.White : Color.LightYellow;
+        }
+        catch (Exception ex)
+        {
+            LogGrid($"Grid_CellValueChanged error: {ex.Message}");
+        }
+        finally
+        {
             _updating = false;
         }
     }
@@ -395,7 +452,7 @@ public sealed class MainForm : Form
                 foreach (DataGridViewRow row in _grid.Rows)
                 {
                     string inst = row.Cells[_colInst.Index].Value?.ToString() ?? "";
-                    var opt = row.Cells[_colTarget.Index].Value as TargetOption;
+                    var opt = ResolveTarget(row.Cells[_colTarget.Index].Value);
                     if (opt == null) continue;
                     maps[inst] = new MapEntry { Kind = opt.Kind, Name = opt.Name };
                 }
@@ -429,6 +486,32 @@ public sealed class MainForm : Form
         });
         t.SetApartmentState(ApartmentState.STA);
         t.Start();
+    }
+
+    private void LogGrid(string msg)
+    {
+        try
+        {
+            var s = "[grid] " + msg;
+            if (_log != null && _log.IsHandleCreated && !_log.IsDisposed)
+            {
+                if (_log.InvokeRequired)
+                    _log.BeginInvoke(new Action(() => AppendLogLine(s)));
+                else
+                    AppendLogLine(s);
+            }
+            else
+            {
+                _pendingLog.Add(s + "|");
+            }
+        }
+        catch { }
+    }
+
+    private void AppendLogLine(string line)
+    {
+        _log.AppendText(line + Environment.NewLine);
+        _log.ScrollToCaret();
     }
 
     private void SetBusy(bool busy)
@@ -651,7 +734,7 @@ public sealed class MainForm : Form
         foreach (DataGridViewRow row in _grid.Rows)
         {
             string inst = row.Cells[_colInst.Index].Value?.ToString() ?? "";
-            var opt = row.Cells[_colTarget.Index].Value as TargetOption;
+            var opt = ResolveTarget(row.Cells[_colTarget.Index].Value);
             if (opt == null) continue; // skip unmapped
             map.Institutions[inst] = new MapEntry { Kind = opt.Kind, Name = opt.Name };
         }
