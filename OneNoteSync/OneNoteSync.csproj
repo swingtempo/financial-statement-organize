@@ -1,8 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
+    <OutputType>WinExe</OutputType>
     <TargetFramework>net48</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
@@ -24,6 +25,13 @@
     <Reference Include="Microsoft.Office.Interop.OneNote">
       <HintPath>$(PIAPath)</HintPath>
     </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- WinForms / drawing references (explicit so the build is independent of
+         UseWindowsForms behavior across SDK versions). -->
+    <Reference Include="System.Windows.Forms" />
+    <Reference Include="System.Drawing" />
   </ItemGroup>
 
   <ItemGroup>

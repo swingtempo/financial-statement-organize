@@ -7,7 +7,7 @@
             "command": "dotnet",
             "args": [
                 "build",
-                "${workspaceFolder}/StatementOrganizer/StatementOrganizer.csproj",
+                "${workspaceFolder}/OneNoteSync/OneNoteSync.csproj",
                 "-v",
                 "quiet"
             ],
@@ -16,6 +16,26 @@
                 "isDefault": true
             },
             "problemMatcher": "$msCompile"
+        },
+        {
+            "label": "build-statementorganizer",
+            "type": "process",
+            "command": "dotnet",
+            "args": [
+                "build",
+                "${workspaceFolder}/StatementOrganizer/StatementOrganizer.csproj",
+                "-v",
+                "quiet"
+            ],
+            "problemMatcher": "$msCompile"
+        },
+        {
+            "label": "OneNoteSync: launch (GUI)",
+            "type": "process",
+            "command": "${workspaceFolder}/OneNoteSync/bin/Debug/OneNoteSync.exe",
+            "args": [],
+            "dependsOn": ["build"],
+            "problemMatcher": []
         }
     ]
 }
