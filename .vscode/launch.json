@@ -11,9 +11,6 @@
             "cwd": "${workspaceFolder}/StatementOrganizer",
             "stopAtEntry": false,
             "console": "internalConsole",
-            "env": {
-                "DOTNET_ROOT": "${env:HOME}/.dotnet"
-            },
             "envFile": "${workspaceFolder}/.env"
         },
         {
@@ -25,9 +22,6 @@
             "cwd": "${workspaceFolder}/StatementOrganizer",
             "stopAtEntry": false,
             "console": "internalConsole",
-            "env": {
-                "DOTNET_ROOT": "${env:HOME}/.dotnet"
-            },
             "envFile": "${workspaceFolder}/.env"
         }
     ]
