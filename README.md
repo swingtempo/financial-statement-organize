@@ -60,3 +60,35 @@ institution, and **every statement found in the file** (files may contain
 multiple statements). Per statement: institution, account name/number,
 statement type, opening/closing balance, statement date, as-of date, due date,
 amount due.
+
+## OneNote import (Windows only)
+
+`OneNoteSync` imports the organized statements into OneNote. Requires the
+**OneNote desktop** app (Microsoft 365 / OneNote 2016) — the Windows 10 (UWP)
+OneNote does not expose the COM API this uses.
+
+```bash
+cd OneNoteSync
+dotnet run -- --list                  # see sections / section groups
+dotnet run -- --test                 # prototype: one test page (run this first!)
+dotnet run -- --test "My Section"    # test page in a specific section
+dotnet run -- --dry-run              # print the plan, change nothing
+dotnet run                           # full import
+```
+
+Flow:
+1. Reads `organized/statements.json` and opens OneNote.
+2. For each **new institution** it asks which OneNote **section** or
+   **section group** to use (or `n` to create a new section). The choice is
+   remembered in `onemap.json` so you are only asked once per institution.
+3. When a **section group** is chosen, a section named
+   `"<group> <year>"` (e.g. `Citibank 2026`) is created in that group
+   (reused if it already exists) — one per statement year.
+4. One page per statement: a summary (account, balances, dates, notes) above
+   the PDF printout (rasterized with the bundled PDFium engine), and the
+   PDF file itself attached to the page.
+
+Because the OneNote COM bits (page HTML + `AddFilesToPage`) can only be
+verified on your machine, run `--test` first: it creates a page with a
+sample summary, a test image, a real PDF printout, and a PDF attachment.
+Check it in OneNote, then run the full import.
