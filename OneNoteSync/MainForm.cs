@@ -11,7 +11,6 @@ namespace OneNoteSync;
 /// </summary>
 public sealed class MainForm : Form
 {
-    private const string ALL_NOTEBOOKS = "All notebooks";
     private readonly string[] _args;
 
     private string _root = "";
@@ -23,6 +22,7 @@ public sealed class MainForm : Form
 
     private bool _busy;
     private bool _updating;
+    private bool _rebuildingOptions;
 
     // Controls.
     private Panel _top = null!;
@@ -57,6 +57,24 @@ public sealed class MainForm : Form
             Name = name; Kind = kind; Notebook = notebook;
         }
         public override string ToString() => Kind == "group" ? $"[GROUP]   {Name}" : $"[SECTION] {Name}";
+        // Value equality (Name + Kind). The combo cell holds an instance built by one
+        // list and the Items hold instances built by another; reference equality would
+        // make the grid report "value is not valid". Comparing by Name + Kind fixes that.
+        public override bool Equals(object? obj)
+        {
+            if (ReferenceEquals(this, obj)) return true;
+            if (obj is not TargetOption other) return false;
+            return string.Equals(Name, other.Name, StringComparison.OrdinalIgnoreCase) && Kind == other.Kind;
+        }
+        public override int GetHashCode()
+        {
+            unchecked
+            {
+                int h = (Name ?? "").GetHashCode();
+                h = (h * 397) ^ (Kind ?? "").GetHashCode();
+                return h;
+            }
+        }
     }
 
     public MainForm(string[] args)
@@ -104,7 +122,7 @@ public sealed class MainForm : Form
         var lblNb = new Label { Text = "Notebook:", Location = new Point(10, 51), AutoSize = true };
         _top.Controls.Add(lblNb);
         _cboNotebook = new ComboBox { Location = new Point(84, 43), Width = 260, DropDownStyle = ComboBoxStyle.DropDownList };
-        _cboNotebook.SelectedIndexChanged += (_, _) => RefreshTargetOptions();
+        _cboNotebook.SelectedIndexChanged += Notebook_Changed;
         _top.Controls.Add(_cboNotebook);
 
         // Info line.
@@ -139,6 +157,14 @@ public sealed class MainForm : Form
         _colStatus = new DataGridViewTextBoxColumn { HeaderText = "Status", ReadOnly = true, FillWeight = 12 };
         _grid.Columns.AddRange(_colInst, _colTarget, _colKind, _colStatus);
         _grid.CellValueChanged += Grid_CellValueChanged;
+        _grid.DataError += (_, e) => { e.ThrowException = false; };
+        // Force the Target combo to commit the moment the user picks, so CellValueChanged
+        // fires reliably and the Status column updates immediately.
+        _grid.CurrentCellDirtyStateChanged += (_, __) =>
+        {
+            if (_grid.IsCurrentCellDirty && _grid.CurrentCell?.OwningColumn.Index == _colTarget.Index)
+                _grid.CommitEdit(DataGridViewDataErrorContexts.Commit);
+        };
 
         // Order matters for Dock layout: add Fill last, then bottom/top.
         Controls.Add(_grid);
@@ -223,35 +249,55 @@ public sealed class MainForm : Form
             // Highlight unmapped rows.
             _grid.Rows[r].DefaultCellStyle.BackColor = opt == null ? Color.LightYellow : Color.White;
         }
+        ClearOutOfFilterCells();
         _updating = false;
     }
 
-    /// <summary>Rebuild the Target dropdown items for the selected notebook filter.</summary>
+    /// <summary>
+    /// Rebuild the Target dropdown: sections / section-groups of the currently
+    /// selected notebook only (true filter). Empty when the hierarchy is not loaded
+    /// or no notebook is selected.
+    /// </summary>
     private void RefreshTargetOptions()
     {
         _colTarget.Items.Clear();
         if (_hierarchy == null) return;
         string nb = SelectedNotebook();
-        var list = new List<TargetOption>();
-        foreach (var g in _hierarchy.Groups.Where(g => nb == "" || g.Notebook == nb))
-            list.Add(new TargetOption(g.Name, "group", g.Notebook));
-        foreach (var s in _hierarchy.Sections.Where(s => nb == "" || s.Notebook == nb))
-            list.Add(new TargetOption(s.Name, "section", s.Notebook));
+        if (nb == "") return;
+        var list = BuildAllOptions().Where(o => o.Notebook == nb).ToList();
+        SortOptions(list);
+        _colTarget.Items.AddRange(list.ToArray());
+    }
+
+    private static void SortOptions(List<TargetOption> list)
+    {
         // Groups first, then by name — so the kind is easy to scan.
         list.Sort((a, b) =>
         {
             int c = string.CompareOrdinal(a.Kind, b.Kind);
             return c != 0 ? c : string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase);
         });
-        _colTarget.Items.AddRange(list.ToArray());
     }
 
-    /// <summary>Build the notebook filter list (All + each notebook), preserving the prior selection.</summary>
+    private void Notebook_Changed(object? sender, EventArgs e)
+    {
+        if (_rebuildingOptions) return;
+        ApplyNotebookFilter();
+    }
+
+    /// <summary>Rebuild the dropdown and clear any picks that fall outside the selected notebook.</summary>
+    private void ApplyNotebookFilter()
+    {
+        RefreshTargetOptions();
+        ClearOutOfFilterCells();
+    }
+
+    /// <summary>Build the notebook list (no "All"), preserving the prior selection where possible.</summary>
     private void RefreshNotebookFilter()
     {
         string prev = _cboNotebook.SelectedItem?.ToString() ?? "";
+        _rebuildingOptions = true;
         _cboNotebook.Items.Clear();
-        _cboNotebook.Items.Add(ALL_NOTEBOOKS);
         if (_hierarchy != null)
         {
             var nbs = new List<string>();
@@ -263,25 +309,46 @@ public sealed class MainForm : Form
         int idx = -1;
         for (int i = 0; i < _cboNotebook.Items.Count; i++)
             if (_cboNotebook.Items[i]!.ToString() == prev) { idx = i; break; }
-        _cboNotebook.SelectedIndex = idx >= 0 ? idx : 0;
+        _cboNotebook.SelectedIndex = idx >= 0 ? idx : (_cboNotebook.Items.Count > 0 ? 0 : -1);
+        _rebuildingOptions = false;
     }
 
-    /// <summary>"" when All notebooks is selected; otherwise the notebook name.</summary>
+    /// <summary>The selected notebook's name; "" when nothing is selected.</summary>
     private string SelectedNotebook()
     {
-        string sel = _cboNotebook.SelectedItem?.ToString() ?? "";
-        return sel == ALL_NOTEBOOKS ? "" : sel;
+        return _cboNotebook.SelectedItem?.ToString() ?? "";
+    }
+
+    /// <summary>
+    /// Clear any target picks that no longer fall inside the selected notebook
+    /// (the dropdown is a true filter, so out-of-filter picks would be invalid).
+    /// </summary>
+    private void ClearOutOfFilterCells()
+    {
+        string nb = SelectedNotebook();
+        bool wasUpdating = _updating;
+        _updating = true;
+        foreach (DataGridViewRow row in _grid.Rows)
+        {
+            var opt = row.Cells[_colTarget.Index].Value as TargetOption;
+            if (opt != null && opt.Notebook != nb)
+            {
+                row.Cells[_colTarget.Index].Value = null;
+                row.Cells[_colKind.Index].Value = "";
+                row.Cells[_colStatus.Index].Value = "UNMAPPED";
+                row.DefaultCellStyle.BackColor = Color.LightYellow;
+            }
+        }
+        _updating = wasUpdating;
     }
 
     /// <summary>All section / section-group options across every notebook.</summary>
     private List<TargetOption> BuildAllOptions()
     {
         var list = new List<TargetOption>();
-        if (_hierarchy != null)
-        {
-            foreach (var g in _hierarchy.Groups) list.Add(new TargetOption(g.Name, "group", g.Notebook));
-            foreach (var s in _hierarchy.Sections) list.Add(new TargetOption(s.Name, "section", s.Notebook));
-        }
+        if (_hierarchy == null) return list;
+        foreach (var g in _hierarchy.Groups) list.Add(new TargetOption(g.Name, "group", g.Notebook));
+        foreach (var s in _hierarchy.Sections) list.Add(new TargetOption(s.Name, "section", s.Notebook));
         return list;
     }
 
