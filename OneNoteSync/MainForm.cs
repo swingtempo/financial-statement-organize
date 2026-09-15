@@ -22,7 +22,7 @@ public sealed class MainForm : Form
 
     private bool _busy;
     private bool _updating;
-    private bool _rebuildingOptions;
+    private System.Threading.CancellationTokenSource? _cts;
 
     // Controls.
     private Panel _top = null!;
@@ -30,13 +30,18 @@ public sealed class MainForm : Form
     private Button _btnDryRun = null!;
     private Button _btnTest = null!;
     private Button _btnRun = null!;
+    private Button _btnStop = null!;
     private Button _btnSave = null!;
     private Button _btnClear = null!;
-    private ComboBox _cboNotebook = null!;
     private Label _info = null!;
     private DataGridView _grid = null!;
-    private DataGridViewComboBoxColumn _colTarget = null!;
+    private DataGridViewCheckBoxColumn _colEnabled = null!;
     private DataGridViewTextBoxColumn _colInst = null!;
+    private DataGridViewTextBoxColumn _colFile = null!;
+    private DataGridViewComboBoxColumn _colNotebook = null!;
+    private DataGridViewComboBoxColumn _colTarget = null!;
+    private DataGridViewButtonColumn _colOpen = null!;
+    private DataGridViewTextBoxColumn _colTitle = null!;
     private DataGridViewTextBoxColumn _colKind = null!;
     private DataGridViewTextBoxColumn _colStatus = null!;
     private RichTextBox _log = null!;
@@ -56,7 +61,11 @@ public sealed class MainForm : Form
         {
             Name = name; Kind = kind; Notebook = notebook;
         }
-        public override string ToString() => Kind == "group" ? $"[GROUP]   {Name}" : $"[SECTION] {Name}";
+        public override string ToString()
+        {
+            string nb = string.IsNullOrEmpty(Notebook) ? "" : $"  ({Notebook})";
+            return Kind == "group" ? $"[GROUP] {Name}{nb}" : $"[SECTION] {Name}{nb}";
+        }
         // Value equality (Name + Kind). The combo cell holds an instance built by one
         // list and the Items hold instances built by another; reference equality would
         // make the grid report "value is not valid". Comparing by Name + Kind fixes that.
@@ -119,8 +128,8 @@ public sealed class MainForm : Form
         StartPosition = FormStartPosition.CenterScreen;
         Font = new Font("Segoe UI", 9f);
 
-        // Top action bar (two rows: buttons, then the notebook filter).
-        _top = new Panel { Dock = DockStyle.Top, Height = 84 };
+        // Top action bar (single row: buttons).
+        _top = new Panel { Dock = DockStyle.Top, Height = 48 };
         var x = 10;
         _btnReload = AddButton(_top, "Reload OneNote", ref x);
         _btnReload.Click += (_, _) => RunSta(DoReloadOneNote);
@@ -130,17 +139,13 @@ public sealed class MainForm : Form
         _btnTest.Click += (_, _) => RunSta(DoTest);
         _btnRun = AddButton(_top, "Run sync", ref x);
         _btnRun.Click += (_, _) => RunSta(() => DoRun(dryRun: false));
+        _btnStop = AddButton(_top, "Stop", ref x);
+        _btnStop.Click += (_, _) => { _cts?.Cancel(); Log("Stop requested — finishing the current page, then stopping."); };
+        _btnStop.Enabled = false;
         _btnSave = AddButton(_top, "Save mapping", ref x);
         _btnSave.Click += (_, _) => SaveMappingFromGrid();
         _btnClear = AddButton(_top, "Clear log", ref x);
         _btnClear.Click += (_, _) => { if (_log.IsHandleCreated) _log.Clear(); };
-
-        // Notebook filter (row 2) — filters the Target dropdown by notebook.
-        var lblNb = new Label { Text = "Notebook:", Location = new Point(10, 51), AutoSize = true };
-        _top.Controls.Add(lblNb);
-        _cboNotebook = new ComboBox { Location = new Point(84, 43), Width = 260, DropDownStyle = ComboBoxStyle.DropDownList };
-        _cboNotebook.SelectedIndexChanged += Notebook_Changed;
-        _top.Controls.Add(_cboNotebook);
 
         // Info line.
         _info = new Label { Dock = DockStyle.Top, Height = 24, TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(8, 0, 0, 0) };
@@ -168,11 +173,18 @@ public sealed class MainForm : Form
             AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
             BackgroundColor = SystemColors.Window,
         };
-        _colInst = new DataGridViewTextBoxColumn { HeaderText = "Institution", ReadOnly = true, FillWeight = 22 };
-        _colTarget = new DataGridViewComboBoxColumn { HeaderText = "Target (section or section-group)", FillWeight = 40 };
-        _colKind = new DataGridViewTextBoxColumn { HeaderText = "Kind", ReadOnly = true, FillWeight = 12 };
-        _colStatus = new DataGridViewTextBoxColumn { HeaderText = "Status", ReadOnly = true, FillWeight = 12 };
-        _grid.Columns.AddRange(_colInst, _colTarget, _colKind, _colStatus);
+        _colEnabled = new DataGridViewCheckBoxColumn { HeaderText = "On", FillWeight = 6 };
+        _colInst = new DataGridViewTextBoxColumn { HeaderText = "Institution", ReadOnly = true, FillWeight = 18 };
+        _colFile = new DataGridViewTextBoxColumn { HeaderText = "File", ReadOnly = true, FillWeight = 22 };
+        _colOpen = new DataGridViewButtonColumn { HeaderText = "Open", FillWeight = 7 };
+        _colNotebook = new DataGridViewComboBoxColumn { HeaderText = "Notebook", FillWeight = 16 };
+        _colTarget = new DataGridViewComboBoxColumn { HeaderText = "Target (section or section-group)", FillWeight = 30 };
+        _colTitle = new DataGridViewTextBoxColumn { HeaderText = "Title (page becomes 'yyyy-MM <title>')", FillWeight = 16 };
+        _colKind = new DataGridViewTextBoxColumn { HeaderText = "Kind", ReadOnly = true, FillWeight = 9 };
+        _colStatus = new DataGridViewTextBoxColumn { HeaderText = "Status", ReadOnly = true, FillWeight = 11 };
+        _grid.Columns.AddRange(_colEnabled, _colInst, _colFile, _colOpen, _colNotebook, _colTarget, _colTitle, _colKind, _colStatus);
+        _grid.CellClick += Grid_CellClick;
+        _grid.CellBeginEdit += Grid_CellBeginEdit;
         _grid.CellValueChanged += Grid_CellValueChanged;
         _grid.CellEndEdit += Grid_CellEndEdit;
         _grid.CellValidating += Grid_CellValidating;
@@ -242,67 +254,74 @@ public sealed class MainForm : Form
     private void RefreshGrid()
     {
         _updating = true;
-        RefreshNotebookFilter();
-        RefreshTargetOptions();
+        RefreshTargetOptions();    // all targets; the per-row Notebook column filters each dropdown
+        RefreshNotebookOptions(); // all notebooks, for the per-row Notebook column
 
-        // Master lookup (all notebooks) so a saved target that belongs to a
-        // different notebook than the current filter still resolves.
         var all = BuildAllOptions();
 
         _grid.Rows.Clear();
-        var institutions = _files
+        var files = _files
             .Where(f => !f.Error && f.Statements.Count > 0)
-            .Select(f => string.IsNullOrWhiteSpace(f.Institution) ? f.Category : f.Institution)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .OrderBy(s => s, StringComparer.OrdinalIgnoreCase);
+            .OrderBy(f => string.IsNullOrWhiteSpace(f.Institution) ? f.Category : f.Institution, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(f => f.FileName, StringComparer.OrdinalIgnoreCase);
 
-        foreach (var inst in institutions)
+        foreach (var f in files)
         {
+            string inst = string.IsNullOrWhiteSpace(f.Institution) ? f.Category : f.Institution;
+            // Per-institution mapping: target + notebook.
             TargetOption? opt = null;
+            string nb = "";
             if (_map.Institutions.TryGetValue(inst, out var e) && !string.IsNullOrWhiteSpace(e.Name))
             {
                 opt = all.FirstOrDefault(o => o.Name.Equals(e.Name, StringComparison.OrdinalIgnoreCase) && o.Kind == e.Kind);
                 if (opt == null)
-                    opt = new TargetOption(e.Name, e.Kind == "group" ? "group" : "section", "");
+                    opt = new TargetOption(e.Name, e.Kind == "group" ? "group" : "section", e.Notebook);
+                nb = e.Notebook;
             }
-            int r = _grid.Rows.Add(inst, opt, opt?.Kind ?? "",
-                                   opt == null ? "UNMAPPED" : "mapped");
-            // Highlight unmapped rows.
+            // Per-file settings: enabled + title (default title = institution).
+            bool enabled = true;
+            string title = inst;
+            if (_map.Files.TryGetValue(f.FileName, out var fs))
+            {
+                enabled = fs.Enabled;
+                title = string.IsNullOrWhiteSpace(fs.Title) ? inst : fs.Title;
+            }
+            int r = _grid.Rows.Add(enabled, inst, f.FileName, "Open", nb, opt, title,
+                                  opt?.Kind ?? "",
+                                  opt == null ? "UNMAPPED" : "mapped");
             _grid.Rows[r].DefaultCellStyle.BackColor = opt == null ? Color.LightYellow : Color.White;
         }
-        ClearOutOfFilterCells();
         _updating = false;
     }
 
     /// <summary>
-    /// Rebuild the Target dropdown: sections / section-groups of the currently
-    /// selected notebook only (true filter). Empty when the hierarchy is not loaded
-    /// or no notebook is selected.
+    /// Sets the Target column's dropdown list to the targets of <c>notebook</c>
+    /// (every notebook when <c>notebook</c> is empty). Includes mapped targets even
+    /// if they don't exist in OneNote yet (created on run). Keeps combo values
+    /// valid.
     /// </summary>
-    private void RefreshTargetOptions()
+    private void SetTargetItems(string? notebook)
     {
-        _colTarget.Items.Clear();
-        string nb = SelectedNotebook();
         var list = new List<TargetOption>();
-        if (_hierarchy != null && nb != "")
-            list.AddRange(BuildAllOptions().Where(o => o.Notebook == nb));
-        // Ensure mapped targets are valid options even if they don't exist in
-        // OneNote yet (they will be created on run). This keeps the combo cell
-        // value valid (and avoids the "value is not valid" DataError).
-        if (nb != "")
+        if (_hierarchy != null)
+            list.AddRange(BuildAllOptions());
+        foreach (var kv in _map.Institutions)
         {
-            foreach (var kv in _map.Institutions)
-            {
-                var e = kv.Value;
-                if (string.IsNullOrWhiteSpace(e.Name)) continue;
-                var kind = e.Kind == "group" ? "group" : "section";
-                if (!list.Any(o => string.Equals(o.Name, e.Name, StringComparison.OrdinalIgnoreCase) && o.Kind == kind))
-                    list.Add(new TargetOption(e.Name, kind, nb));
-            }
+            var e = kv.Value;
+            if (string.IsNullOrWhiteSpace(e.Name)) continue;
+            var kind = e.Kind == "group" ? "group" : "section";
+            if (!list.Any(o => string.Equals(o.Name, e.Name, StringComparison.OrdinalIgnoreCase) && o.Kind == kind))
+                list.Add(new TargetOption(e.Name, kind, e.Notebook));
         }
+        if (!string.IsNullOrEmpty(notebook))
+            list = list.Where(o => o.Notebook == notebook).ToList();
         SortOptions(list);
+        _colTarget.Items.Clear();
         _colTarget.Items.AddRange(list.ToArray());
     }
+
+    /// <summary>Restore the Target dropdown to the full list (all notebooks).</summary>
+    private void RefreshTargetOptions() => SetTargetItems(null);
 
     private static void SortOptions(List<TargetOption> list)
     {
@@ -314,76 +333,45 @@ public sealed class MainForm : Form
         });
     }
 
-    private void Notebook_Changed(object? sender, EventArgs e)
+    /// <summary>Fill the per-row Notebook dropdown with all known notebooks.</summary>
+    private void RefreshNotebookOptions()
     {
-        if (_rebuildingOptions) return;
-        ApplyNotebookFilter();
+        _colNotebook.Items.Clear();
+        var nbs = AllNotebooks();
+        if (nbs.Count > 0) _colNotebook.Items.AddRange(nbs.ToArray());
     }
 
-    /// <summary>Rebuild the dropdown and clear any picks that fall outside the selected notebook.</summary>
-    private void ApplyNotebookFilter()
+    /// <summary>All distinct notebook names in the hierarchy.</summary>
+    private List<string> AllNotebooks()
     {
-        RefreshTargetOptions();
-        ClearOutOfFilterCells();
-    }
-
-    /// <summary>Build the notebook list (no "All"), preserving the prior selection where possible.</summary>
-    private void RefreshNotebookFilter()
-    {
-        string prev = _cboNotebook.SelectedItem?.ToString() ?? "";
-        _rebuildingOptions = true;
-        _cboNotebook.Items.Clear();
+        var nbs = new List<string>();
         if (_hierarchy != null)
         {
-            var nbs = new List<string>();
             nbs.AddRange(_hierarchy.Groups.Select(g => g.Notebook));
             nbs.AddRange(_hierarchy.Sections.Select(s => s.Notebook));
-            foreach (var nb in nbs.Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(s => s, StringComparer.OrdinalIgnoreCase))
-                _cboNotebook.Items.Add(nb);
         }
-        int idx = -1;
-        for (int i = 0; i < _cboNotebook.Items.Count; i++)
-            if (_cboNotebook.Items[i]!.ToString() == prev) { idx = i; break; }
-        _cboNotebook.SelectedIndex = idx >= 0 ? idx : (_cboNotebook.Items.Count > 0 ? 0 : -1);
-        _rebuildingOptions = false;
+        return nbs.Where(s => !string.IsNullOrWhiteSpace(s))
+                 .Distinct(StringComparer.OrdinalIgnoreCase)
+                 .OrderBy(s => s, StringComparer.OrdinalIgnoreCase)
+                 .ToList();
     }
 
-    /// <summary>The selected notebook's name; "" when nothing is selected.</summary>
-    private string SelectedNotebook()
+    /// <summary>The Notebook value of a grid row ("" if the row is invalid).</summary>
+    private string GetRowNotebook(int rowIndex)
     {
-        return _cboNotebook.SelectedItem?.ToString() ?? "";
+        if (rowIndex < 0 || rowIndex >= _grid.Rows.Count) return "";
+        return _grid.Rows[rowIndex].Cells[_colNotebook.Index].Value?.ToString() ?? "";
     }
 
-    /// <summary>
-    /// Clear any target picks that no longer fall inside the selected notebook
-    /// (the dropdown is a true filter, so out-of-filter picks would be invalid).
-    /// </summary>
-    private void ClearOutOfFilterCells()
-    {
-        string nb = SelectedNotebook();
-        bool wasUpdating = _updating;
-        _updating = true;
-        foreach (DataGridViewRow row in _grid.Rows)
-        {
-            var opt = row.Cells[_colTarget.Index].Value as TargetOption;
-            if (opt != null && opt.Notebook != nb)
-            {
-                row.Cells[_colTarget.Index].Value = null;
-                row.Cells[_colKind.Index].Value = "";
-                row.Cells[_colStatus.Index].Value = "UNMAPPED";
-                row.DefaultCellStyle.BackColor = Color.LightYellow;
-            }
-        }
-        _updating = wasUpdating;
-    }
-
-    /// <summary>All section / section-group options across every notebook.</summary>
+    /// <summary>All section / section-group options across every notebook (recycle bins excluded).</summary>
     private List<TargetOption> BuildAllOptions()
     {
         var list = new List<TargetOption>();
         if (_hierarchy == null) return list;
-        foreach (var g in _hierarchy.Groups) list.Add(new TargetOption(g.Name, "group", g.Notebook));
-        foreach (var s in _hierarchy.Sections) list.Add(new TargetOption(s.Name, "section", s.Notebook));
+        foreach (var g in _hierarchy.Groups)
+            if (g.Name != "OneNote_RecycleBin") list.Add(new TargetOption(g.Name, "group", g.Notebook));
+        foreach (var s in _hierarchy.Sections)
+            if (s.Name != "OneNote_RecycleBin") list.Add(new TargetOption(s.Name, "section", s.Notebook));
         return list;
     }
 
@@ -411,9 +399,50 @@ public sealed class MainForm : Form
         return null;
     }
 
+    /// <summary>
+    /// Per-row filter: when the user opens the Target dropdown, show only the
+    /// targets belonging to that row's Notebook.
+    /// </summary>
+    private void Grid_CellBeginEdit(object? sender, DataGridViewCellCancelEventArgs e)
+    {
+        if (e.RowIndex >= 0 && e.ColumnIndex == _colTarget.Index)
+            SetTargetItems(GetRowNotebook(e.RowIndex));
+    }
+
     private void Grid_CellEndEdit(object? sender, DataGridViewCellEventArgs e)
     {
+        // After editing, restore the full Target list so every row's value is valid again.
+        if (e.ColumnIndex == _colTarget.Index)
+            SetTargetItems(null);
         LogGrid($"CellEndEdit row={e.RowIndex} col={e.ColumnIndex} value={(e.RowIndex >= 0 ? (_grid.Rows[e.RowIndex].Cells[e.ColumnIndex].Value?.ToString() ?? "(null)") : "?")}");
+    }
+
+    /// <summary>
+    /// The "Open" button next to the file name: shell-executes (opens) the PDF so
+    /// the user can inspect it in detail.
+    /// </summary>
+    private void Grid_CellClick(object? sender, DataGridViewCellEventArgs e)
+    {
+        if (e.RowIndex < 0 || e.ColumnIndex != _colOpen.Index) return;
+        string file = _grid.Rows[e.RowIndex].Cells[_colFile.Index].Value?.ToString() ?? "";
+        if (file.Length == 0) return;
+        var f = _files.FirstOrDefault(x => string.Equals(x.FileName, file, StringComparison.OrdinalIgnoreCase));
+        if (f == null) return;
+        string pdf = Path.Combine(_outDir, f.Category, f.FileName);
+        if (!File.Exists(pdf))
+        {
+            Log("  Open: file not found at " + pdf, error: true);
+            return;
+        }
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(pdf) { UseShellExecute = true });
+            Log("  Open: " + pdf);
+        }
+        catch (Exception ex)
+        {
+            Log("  Open failed: " + ex.Message, error: true);
+        }
     }
 
     private void Grid_CellValidating(object? sender, DataGridViewCellValidatingEventArgs e)
@@ -423,35 +452,52 @@ public sealed class MainForm : Form
 
     private void Grid_CellValueChanged(object? sender, DataGridViewCellEventArgs e)
     {
-        if (e.RowIndex < 0) return;
-        if (e.ColumnIndex != _colTarget.Index) return;
-        if (_updating) return; // prevent re-entrancy from our own writes
+        if (e.RowIndex < 0 || _updating) return;
+        var row = _grid.Rows[e.RowIndex];
 
-        var raw = _grid.Rows[e.RowIndex].Cells[_colTarget.Index].Value;
-        if (raw is not TargetOption)
-            LogGrid($"[diag] row={e.RowIndex} Target value is NOT a TargetOption: type={(raw?.GetType().Name ?? "null")} text={(raw?.ToString() ?? "(null)")}");
-        var opt = ResolveTarget(raw);
-
-        _updating = true;
-        try
+        if (e.ColumnIndex == _colNotebook.Index)
         {
-            // Self-heal: if the grid stored a display string, write back a real
-            // TargetOption so the value is valid again (fixes "value is not valid"
-            // and the empty Kind/Status).
-            if (raw is string && opt != null)
-                _grid.Rows[e.RowIndex].Cells[_colTarget.Index].Value = opt;
-            _grid.Rows[e.RowIndex].Cells[_colKind.Index].Value = opt?.Kind ?? "";
-            bool mapped = opt != null;
-            _grid.Rows[e.RowIndex].Cells[_colStatus.Index].Value = mapped ? "mapped" : "UNMAPPED";
-            _grid.Rows[e.RowIndex].DefaultCellStyle.BackColor = mapped ? Color.White : Color.LightYellow;
+            // Notebook changed: clear a target that no longer belongs to this notebook
+            // (the per-row filter would make it an invalid pick).
+            string nb = row.Cells[_colNotebook.Index].Value?.ToString() ?? "";
+            var opt = ResolveTarget(row.Cells[_colTarget.Index].Value);
+            _updating = true;
+            try
+            {
+                if (opt != null && !string.IsNullOrEmpty(nb) && opt.Notebook != nb)
+                {
+                    row.Cells[_colTarget.Index].Value = null;
+                    row.Cells[_colKind.Index].Value = "";
+                    row.Cells[_colStatus.Index].Value = "UNMAPPED";
+                    row.DefaultCellStyle.BackColor = Color.LightYellow;
+                    LogGrid($"row={e.RowIndex}: notebook -> '{nb}'; target '{opt.Name}' is in '{opt.Notebook}' so it was cleared");
+                }
+            }
+            finally { _updating = false; }
         }
-        catch (Exception ex)
+        else if (e.ColumnIndex == _colTarget.Index)
         {
-            LogGrid($"Grid_CellValueChanged error: {ex.Message}");
-        }
-        finally
-        {
-            _updating = false;
+            var raw = row.Cells[_colTarget.Index].Value;
+            var opt = ResolveTarget(raw);
+            _updating = true;
+            try
+            {
+                // Self-heal: if the grid stored a display string, write back a real
+                // TargetOption so the value is valid again.
+                if (raw is string && opt != null)
+                    row.Cells[_colTarget.Index].Value = opt;
+                row.Cells[_colKind.Index].Value = opt?.Kind ?? "";
+                row.Cells[_colStatus.Index].Value = opt != null ? "mapped" : "UNMAPPED";
+                row.DefaultCellStyle.BackColor = opt != null ? Color.White : Color.LightYellow;
+                // Auto-sync the Notebook column to the picked target's notebook.
+                if (opt != null && !string.IsNullOrEmpty(opt.Notebook))
+                    row.Cells[_colNotebook.Index].Value = opt.Notebook;
+            }
+            catch (Exception ex)
+            {
+                LogGrid($"Grid_CellValueChanged error: {ex.Message}");
+            }
+            finally { _updating = false; }
         }
     }
 
@@ -467,46 +513,48 @@ public sealed class MainForm : Form
         catch { /* form already closing */ }
     }
 
-    /// <summary>
-    /// Read the grid's institution -&gt; target mapping. The grid is a UI control, so
-    /// it must be read on the UI thread; this marshals a blocking read and returns
-    /// a plain dictionary the background thread can safely use.
-    /// </summary>
-    private Dictionary<string, MapEntry> SnapshotMappings()
+    /// <summary>Per-file run settings read from the grid.</summary>
+    private sealed class RunRow
     {
-        var maps = new Dictionary<string, MapEntry>(StringComparer.OrdinalIgnoreCase);
+        public string FileName = "";
+        public string Institution = "";
+        public bool Enabled = true;
+        public TargetOption? Target;
+        public string Notebook = "";
+        public string Title = "";
+    }
+
+    /// <summary>
+    /// Read per-file run settings (enabled, target, notebook, title) from the grid.
+    /// The grid is a UI control, so it must be read on the UI thread; this
+    /// marshals a blocking read and returns plain data the background thread can use.
+    /// </summary>
+    private List<RunRow> SnapshotRunRows()
+    {
+        var rows = new List<RunRow>();
         try
         {
-            if (_log == null || !_log.IsHandleCreated) return maps;
+            if (_log == null || !_log.IsHandleCreated) return rows;
             Action fill = () =>
             {
                 foreach (DataGridViewRow row in _grid.Rows)
                 {
-                    string inst = row.Cells[_colInst.Index].Value?.ToString() ?? "";
-                    var opt = ResolveTarget(row.Cells[_colTarget.Index].Value);
-                    if (opt == null) continue;
-                    maps[inst] = new MapEntry { Kind = opt.Kind, Name = opt.Name };
+                    rows.Add(new RunRow
+                    {
+                        FileName = row.Cells[_colFile.Index].Value?.ToString() ?? "",
+                        Institution = row.Cells[_colInst.Index].Value?.ToString() ?? "",
+                        Enabled = (bool)(row.Cells[_colEnabled.Index].Value ?? true),
+                        Target = ResolveTarget(row.Cells[_colTarget.Index].Value),
+                        Notebook = row.Cells[_colNotebook.Index].Value?.ToString() ?? "",
+                        Title = row.Cells[_colTitle.Index].Value?.ToString() ?? "",
+                    });
                 }
             };
             if (_log.InvokeRequired) _log.Invoke(fill);
             else fill();
         }
         catch { /* form already closing — return what we have */ }
-        return maps;
-    }
-
-    /// <summary>Read the selected notebook name on the UI thread.</summary>
-    private string SnapshotNotebook()
-    {
-        string nb = "";
-        try
-        {
-            if (_log == null || !_log.IsHandleCreated) return nb;
-            if (_log.InvokeRequired) _log.Invoke(new Action(() => nb = SelectedNotebook()));
-            else nb = SelectedNotebook();
-        }
-        catch { }
-        return nb;
+        return rows;
     }
 
     // ------------------------------------------------------------------
@@ -606,8 +654,8 @@ public sealed class MainForm : Form
             return;
         }
 
-        // The grid is a UI control; read it on the UI thread into a plain dict.
-        var maps = SnapshotMappings();
+        // The grid is a UI control; read it on the UI thread into plain data.
+        var rows = SnapshotRunRows();
 
         OneNote? onenote = null;
         Hierarchy? h = null;
@@ -620,18 +668,35 @@ public sealed class MainForm : Form
             _hierarchy = h;
         }
 
-        int made = 0, skipped = 0, noTarget = 0;
-        string notebook = SnapshotNotebook();
-        Log($"Importing {_files.Count} file(s) {(dryRun ? "(dry run)" : "into OneNote")}");
+        _cts = new System.Threading.CancellationTokenSource();
+        if (!dryRun) OnUi(() => _btnStop.Enabled = true);
 
-        foreach (var f in _files.Where(f => !f.Error && f.Statements.Count > 0))
+        int made = 0, skipped = 0, noTarget = 0, disabled = 0;
+        int dpi = Core.GetDpi(_env);
+        int maxPages = Core.GetMaxPages(_env);
+        Log($"Importing {rows.Count} file(s) {(dryRun ? "(dry run)" : "into OneNote")} — one page per file");
+
+        foreach (var rr in rows)
         {
-            string inst = string.IsNullOrWhiteSpace(f.Institution) ? f.Category : f.Institution;
-            if (!maps.TryGetValue(inst, out var entry))
+            if (_cts is { IsCancellationRequested: true })
             {
-                Log($"  {inst}: NO TARGET SET in the mapping — skipping {f.Statements.Count} statement(s).", error: true);
-                skipped += f.Statements.Count;
+                Log("Stopped by user — aborting remaining files.", error: true);
+                break;
+            }
+            var f = _files.FirstOrDefault(x => string.Equals(x.FileName, rr.FileName, StringComparison.OrdinalIgnoreCase));
+            if (f == null || f.Error || f.Statements.Count == 0) continue;
+
+            if (!rr.Enabled)
+            {
+                Log($"  {f.FileName}: skipped (disabled).");
+                disabled++;
+                continue;
+            }
+            if (rr.Target == null)
+            {
+                Log($"  {f.FileName}: NO TARGET SET — skipping.", error: true);
                 noTarget++;
+                skipped++;
                 continue;
             }
 
@@ -639,57 +704,58 @@ public sealed class MainForm : Form
             if (!File.Exists(pdf))
             {
                 Log($"  ! {f.FileName}: PDF not found at {pdf} — skipping.", error: true);
-                skipped += f.Statements.Count;
+                skipped++;
                 continue;
             }
 
-            int dpi = Core.GetDpi(_env);
-            int maxPages = Core.GetMaxPages(_env);
+            int year = f.Statements.Select(s => s.StatementDate?.Year ?? 0).Max();
+            if (year == 0) year = DateTime.Now.Year;
+            string pageName = Core.PageTitle(f, rr.Title);
 
-            foreach (var st in f.Statements)
+            if (dryRun)
             {
-                int year = st.StatementDate?.Year ?? DateTime.Now.Year;
-                string pageName = Core.PageName(st);
+                string label = rr.Target.Kind == "group" ? $"{rr.Target.Name} {year}" : rr.Target.Name;
+                Log($"  [plan] {f.FileName} ({f.Statements.Count} account(s)) -> {label} / {pageName}");
+                continue;
+            }
 
-                if (dryRun)
-                {
-                    string label = entry.Kind == "group" ? $"{entry.Name} {year}" : entry.Name;
-                    Log($"  [plan] {f.FileName} :: {st.AccountName} -> {label} / {pageName}");
-                    continue;
-                }
-
-                Log($"  {f.FileName} :: {st.AccountName}");
-                try
-                {
-                    var sec = ResolveSection(onenote!, ref h!, entry, year, notebook);
-                    Log($"    -> [{sec.Notebook}] {sec.Name} / {pageName}");
-                    string pageId = onenote!.CreateNote(sec.Guid, pageName);
-                    var lines = Core.BuildSummaryLines(f, st);
-                    string summary = string.Join("\n", lines);
-                    var rasters = PdfTools.Rasterize(pdf, dpi, maxPages);
-                    onenote.CommitPageFull(pageId, summary, pdf, rasters, dpi);
-                    made++;
-                    Log($"    created + content set ({rasters.Count} image(s)).");
-                }
-                catch (Exception e)
-                {
-                    Log("    FAILED: " + e.Message, error: true);
-                    if (e is System.Runtime.InteropServices.COMException ce)
-                        Log("      HRESULT 0x" + ce.HResult.ToString("X8") + " (0x80042004 = OneNote write lock — try the local 'StatementsAll' notebook or reset OneDrive sync)", error: true);
-                    skipped++;
-                }
+            Log($"  {f.FileName} ({f.Statements.Count} account(s))");
+            try
+            {
+                var entry = new MapEntry { Kind = rr.Target.Kind, Name = rr.Target.Name };
+                var sec = ResolveSection(onenote!, ref h!, entry, year, rr.Notebook, rr.Title);
+                Log($"    -> [{sec.Notebook}] {sec.Name} / {pageName}");
+                string pageId = onenote!.CreateNote(sec.Guid, pageName);
+                // Page title first (it becomes the OneNote page title), then the
+                // combined summary of every account in the file, on one page.
+                var lines = new List<string> { pageName };
+                lines.AddRange(Core.BuildFileSummary(f));
+                string summary = string.Join("\n", lines);
+                var rasters = PdfTools.Rasterize(pdf, dpi, maxPages);
+                onenote.CommitPageFull(pageId, summary, pdf, rasters, dpi);
+                made++;
+                Log($"    created + content set ({rasters.Count} image(s), {f.Statements.Count} account(s)).");
+            }
+            catch (Exception e)
+            {
+                Log("    FAILED: " + e.Message, error: true);
+                if (e is System.Runtime.InteropServices.COMException ce)
+                    Log("      HRESULT 0x" + ce.HResult.ToString("X8") + " (0x80042004 = OneNote write lock — try the local 'StatementsAll' notebook or reset OneDrive sync)", error: true);
+                skipped++;
             }
         }
 
+        OnUi(() => _btnStop.Enabled = false);
+        _cts?.Dispose(); _cts = null;
         onenote?.Dispose();
 
         if (dryRun)
         {
-            Log($"Dry run complete. {noTarget} institution(s) had no target set.");
+            Log($"Dry run complete. {noTarget} file(s) had no target set, {disabled} disabled.");
         }
         else
         {
-            Log($"Done. {made} OneNote page(s) created, {skipped} statement(s) skipped.");
+            Log($"Done. {made} OneNote page(s) created, {skipped} skipped, {disabled} disabled.");
             OnUi(() => SaveMappingFromGrid(silent: true));
             Log("OneNote is open so you can browse the new pages.");
         }
@@ -762,31 +828,52 @@ public sealed class MainForm : Form
     }
 
     /// <summary>
-    /// Resolve (and create, if needed) the target section for a mapping entry.
-    /// For a group mapping, the section is "{group} {year}".
+    /// Resolve (and create, best-effort) the target section for a mapping entry.
+    /// For a group mapping, the section is "{Title} {year}" (created in the group if needed).
     /// </summary>
-    private static SectionInfo ResolveSection(OneNote onenote, ref Hierarchy h, MapEntry entry, int year, string notebook)
+    private static SectionInfo ResolveSection(OneNote onenote, ref Hierarchy h, MapEntry entry, int year, string notebook, string title)
     {
         if (entry.Kind == "group")
         {
             var g = h.Groups.FirstOrDefault(g => g.Name.Equals(entry.Name, StringComparison.OrdinalIgnoreCase))
                   ?? throw new Exception($"Section group \"{entry.Name}\" no longer exists in OneNote.");
-            string name = $"{entry.Name} {year}";
+            string baseName = string.IsNullOrWhiteSpace(title) ? entry.Name : title.Trim();
+            string name = $"{baseName} {year}";
 
             var existing = h.Sections.FirstOrDefault(s => s.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
             if (existing != null) return existing;
 
-            onenote.CreateSectionInGroup(name, g.Guid, g.Notebook);
-            h = onenote.GetHierarchy();
-            return h.Sections.First(s => s.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+            // Best-effort create. Section creation is often blocked (0x80042004);
+            // if it fails, give a clear, actionable message.
+            try
+            {
+                onenote.CreateSectionInGroup(name, g.Guid, g.Notebook);
+                h = onenote.GetHierarchy();
+            }
+            catch (Exception e)
+            {
+                throw new Exception($"Could not create section \"{name}\" in group \"{entry.Name}\" ({e.Message}). Create it manually in OneNote and re-run.");
+            }
+            var created = h.Sections.FirstOrDefault(s => s.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+            if (created != null) return created;
+            throw new Exception($"Section \"{name}\" was not created in group \"{entry.Name}\". Create it manually in OneNote and re-run.");
         }
 
         var sec = h.Sections.FirstOrDefault(s => s.Name.Equals(entry.Name, StringComparison.OrdinalIgnoreCase));
         if (sec != null) return sec;
 
-        onenote.CreateSection(entry.Name, string.IsNullOrEmpty(notebook) ? secNotebookFallback(h) : notebook);
-        h = onenote.GetHierarchy();
-        return h.Sections.First(s => s.Name.Equals(entry.Name, StringComparison.OrdinalIgnoreCase));
+        try
+        {
+            onenote.CreateSection(entry.Name, string.IsNullOrEmpty(notebook) ? secNotebookFallback(h) : notebook);
+            h = onenote.GetHierarchy();
+        }
+        catch (Exception e)
+        {
+            throw new Exception($"Could not create section \"{entry.Name}\" ({e.Message}). Create it manually in OneNote and re-run.");
+        }
+        var createdSec = h.Sections.FirstOrDefault(s => s.Name.Equals(entry.Name, StringComparison.OrdinalIgnoreCase));
+        if (createdSec != null) return createdSec;
+        throw new Exception($"Section \"{entry.Name}\" was not created. Create it manually in OneNote and re-run.");
     }
 
     static string secNotebookFallback(Hierarchy h) => h.Sections.FirstOrDefault()?.Notebook ?? "";
@@ -794,18 +881,39 @@ public sealed class MainForm : Form
     private void SaveMappingFromGrid(bool silent = false)
     {
         var map = new OneMap();
+        var seenInst = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (DataGridViewRow row in _grid.Rows)
         {
             string inst = row.Cells[_colInst.Index].Value?.ToString() ?? "";
+            string file = row.Cells[_colFile.Index].Value?.ToString() ?? "";
+            string nb = row.Cells[_colNotebook.Index].Value?.ToString() ?? "";
+            // Per-file settings: enabled + title.
+            if (file.Length > 0)
+            {
+                map.Files[file] = new FileSetting
+                {
+                    Enabled = (bool)(row.Cells[_colEnabled.Index].Value ?? true),
+                    Title = row.Cells[_colTitle.Index].Value?.ToString() ?? "",
+                };
+            }
+            // Per-institution mapping: target + notebook (first file for the institution wins).
             var opt = ResolveTarget(row.Cells[_colTarget.Index].Value);
-            if (opt == null) continue; // skip unmapped
-            map.Institutions[inst] = new MapEntry { Kind = opt.Kind, Name = opt.Name };
+            if (opt != null && !seenInst.Contains(inst))
+            {
+                seenInst.Add(inst);
+                map.Institutions[inst] = new MapEntry
+                {
+                    Kind = opt.Kind,
+                    Name = opt.Name,
+                    Notebook = string.IsNullOrEmpty(nb) ? opt.Notebook : nb,
+                };
+            }
         }
         try
         {
             string mapPath = Core.MapPath(_root);
             Core.SaveMap(mapPath, map);
-            if (!silent) Log($"Saved {map.Institutions.Count} mapping(s) to {mapPath}");
+            if (!silent) Log($"Saved {map.Institutions.Count} institution mapping(s) and {map.Files.Count} file setting(s) to {mapPath}");
         }
         catch (Exception e)
         {

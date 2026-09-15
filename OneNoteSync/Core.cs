@@ -7,6 +7,8 @@ namespace OneNoteSync;
 public sealed class OneMap
 {
     public Dictionary<string, MapEntry> Institutions { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>Per-file settings (enabled + title), keyed by file name.</summary>
+    public Dictionary<string, FileSetting> Files { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 }
 
 public sealed class MapEntry
@@ -15,6 +17,15 @@ public sealed class MapEntry
     public string Kind { get; set; } = "section";
     /// <summary>Section name, or section-group name (a "{group} {year}" section is created in it).</summary>
     public string Name { get; set; } = "";
+    /// <summary>The notebook this institution maps to (per-institution, replaces the global notebook).</summary>
+    public string Notebook { get; set; } = "";
+}
+
+/// <summary>Per-file (per-statement) settings: whether to process it and its page title.</summary>
+public sealed class FileSetting
+{
+    public bool Enabled { get; set; } = true;
+    public string Title { get; set; } = "";
 }
 
 /// <summary>
@@ -100,6 +111,47 @@ public static class Core
         string d = st.StatementDate?.ToString("yyyy-MM") ?? DateTime.Now.ToString("yyyy-MM");
         string n = Sanitize(st.AccountName);
         string name = n.Length > 0 ? $"{d} {n}" : d;
+        return name.Length > 60 ? name.Substring(0, 60).Trim() : name;
+    }
+
+    /// <summary>
+    /// The combined summary for a whole statement file (all its accounts on one
+    /// page). Returns the detail lines (the page title is prepended separately).
+    /// </summary>
+    public static List<string> BuildFileSummary(StatementFile f)
+    {
+        var lines = new List<string>();
+        lines.Add($"{f.Institution} — {f.Statements.Count} account(s)");
+        foreach (var st in f.Statements)
+        {
+            lines.Add("");
+            lines.Add($"== {st.AccountName}" + (string.IsNullOrWhiteSpace(st.AccountNumber) ? "" : $" (\u2026{st.AccountNumber})") + " ==");
+            lines.Add(st.StatementType +
+                     (st.StatementDate != null ? $" — issued {st.StatementDate.Value:MMMM d, yyyy}" : ""));
+            lines.Add($"Balance: {Money(st.Balance)}");
+            if (st.Balance != st.OpeningBalance) lines.Add($"Opening balance: {Money(st.OpeningBalance)}");
+            if (st.ClosingBalance.HasValue && (st.Balance == null || st.ClosingBalance.Value != st.Balance))
+                lines.Add($"Closing balance: {Money(st.ClosingBalance.Value)}");
+            if (st.AsOfDate.HasValue) lines.Add($"As of: {st.AsOfDate.Value:MMMM d, yyyy}");
+            if (st.DueDate.HasValue)
+                lines.Add($"Payment due: {st.DueDate.Value:MMMM d, yyyy}"
+                          + (st.AmountDue.HasValue ? $" — {Money(st.AmountDue.Value)}" : ""));
+            foreach (var note in st.Notes) lines.Add("\u2022 " + note);
+        }
+        return lines;
+    }
+
+    /// <summary>
+    /// The page title: "yyyy-MM &lt;title&gt;" (the year-month is prepended, per request).
+    /// Uses the latest statement date in the file; falls back to the current month.
+    /// </summary>
+    public static string PageTitle(StatementFile f, string title)
+    {
+        var dates = f.Statements.Where(s => s.StatementDate.HasValue).Select(s => s.StatementDate!.Value).ToList();
+        string ym = dates.Count > 0 ? dates.Max().ToString("yyyy-MM") : DateTime.Now.ToString("yyyy-MM");
+        string t = Sanitize(title);
+        if (t.Length == 0) t = Sanitize(f.Institution.Length > 0 ? f.Institution : "Statement");
+        string name = $"{ym} {t}";
         return name.Length > 60 ? name.Substring(0, 60).Trim() : name;
     }
 

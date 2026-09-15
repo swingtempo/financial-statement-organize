@@ -70,9 +70,9 @@ namespace OneNoteSync
                             Notebook = nbName
                         });
                     }
-                    foreach (var grp in nb.Elements())
+                    foreach (var grp in nb.Descendants())
                     {
-                        if (grp.Name.LocalName != "SectionSectionGroup") continue;
+                        if (grp.Name.LocalName != "SectionGroup") continue;
                         h.Groups.Add(new GroupInfo
                         {
                             Name = (string)grp.Attribute("name") ?? "",
@@ -102,7 +102,7 @@ namespace OneNoteSync
             _app.UpdateHierarchy(x);
         }
 
-        /// <summary>Add a new section inside a section group (best-effort).</summary>
+        /// <summary>Add a new section inside a section group (best-effort; often blocked by 0x80042004).</summary>
         public void CreateSectionInGroup(string name, string groupGuid, string notebook)
         {
             string guid = "{" + Guid.NewGuid().ToString("N").ToUpperInvariant() + "}";
@@ -110,10 +110,10 @@ namespace OneNoteSync
             string x =
                 "<one:Hierarchy xmlns:one=\"http://schemas.microsoft.com/office/onenote/2013/onenote\">" +
                 "<one:Notebook name=\"" + X(notebook) + "\">" +
-                "<one:SectionSectionGroup name=\"" + name + "\" sectionGroupID=\"" + groupGuid + "\">" +
-                "<one:Section name=\"" + X(name) + "\" sectionID=\"" + guid + "\">" +
-                "<one:Page name=\"Untitled page\" pageID=\"" + pgid + "\"/></one:Section>" +
-                "</one:SectionSectionGroup></one:Notebook></one:Hierarchy>";
+                "<one:SectionGroup name=\"" + name + "\" ID=\"" + groupGuid + "\">" +
+                "<one:Section name=\"" + X(name) + "\" ID=\"" + guid + "\">" +
+                "<one:Page name=\"Untitled page\" ID=\"" + pgid + "\"/></one:Section>" +
+                "</one:SectionGroup></one:Notebook></one:Hierarchy>";
             _app.UpdateHierarchy(x);
         }
 
@@ -195,6 +195,7 @@ namespace OneNoteSync
             if (idx < 0) throw new Exception("No </one:Page> in page XML");
             string newXml = xml.Insert(idx, body);
             _app.UpdatePage(newXml);
+            Thread.Sleep(5000);
         }
 
         static string X(string s) => (s ?? "").Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;").Replace("\"", "&quot;");
