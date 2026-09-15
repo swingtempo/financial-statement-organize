@@ -10,6 +10,9 @@ using System.Threading;
 using System.Windows.Forms;
 using System.Xml.Linq;
 using Microsoft.Office.Interop.OneNote;
+using Patagames.Pdf;
+using Patagames.Pdf.Net;
+using Patagames.Pdf.Enums;
 
 namespace OneNoteXmlViewer
 {
@@ -25,7 +28,7 @@ namespace OneNoteXmlViewer
         Microsoft.Office.Interop.OneNote.Application _app;
         TextBox txtSearch, txtPageId, txtXml, txtBinInfo, txtLog;
         TextBox txtPdfPath, txtPreferredName, txtInsertResult;
-        CheckBox chkPathCache, chkSyncAfter;
+        CheckBox chkPathCache, chkSyncAfter, chkImages;
         ComboBox cboPages, cboPageInfo, cboWriteMethod;
         ListBox lstCallbacks;
         List<PageItem> _allPages = new List<PageItem>();
@@ -107,7 +110,9 @@ namespace OneNoteXmlViewer
             Controls.Add(Btn("Probe ribbon", 940, 548, 130, (s, e) => ProbeRibbon()));
             chkPathCache = new CheckBox { Text = "Also set pathCache (copy PDF to a local path)", Location = new Point(370, 548), AutoSize = true };
             Controls.Add(chkPathCache);
-            chkSyncAfter = new CheckBox { Text = "Call SyncHierarchy after insert", Location = new Point(700, 548), AutoSize = true };
+            chkImages = new CheckBox { Text = "Also insert each page as an image", Location = new Point(700, 548), AutoSize = true };
+            Controls.Add(chkImages);
+            chkSyncAfter = new CheckBox { Text = "Call SyncHierarchy after insert", Location = new Point(800, 512), AutoSize = true };
             Controls.Add(chkSyncAfter);
             Controls.Add(Lbl("Result:", 8, 582));
             txtInsertResult = TB(8, 600, 1144, 60, mono: true); Controls.Add(txtInsertResult);
@@ -419,7 +424,7 @@ namespace OneNoteXmlViewer
         void BrowsePdf()
         {
             using (var ofd = new OpenFileDialog { Filter = "PDF|*.pdf|All|*.*" })
-            { if (ofd.ShowDialog() == DialogResult.OK) { txtPdfPath.Text = ofd.FileName; if (string.IsNullOrEmpty(txtPreferredName.Text)) txtPreferredName.Text = ofd.FileName; } }
+            { if (ofd.ShowDialog() == DialogResult.OK) { txtPdfPath.Text = ofd.FileName; if (string.IsNullOrEmpty(txtPreferredName.Text)) txtPreferredName.Text = Path.GetFileName(ofd.FileName); } }
         }
 
         // ---------- UI AUTOMATION PROBE ----------
@@ -469,22 +474,133 @@ namespace OneNoteXmlViewer
         }
 
         // ---------- PDF INSERT TEST ----------
-        string BuildInsertedFileBlock(string pdf, string name, string pathCache)
+        string BuildInsertedFileBlock(string pdf, string name, string pathCache, List<(string Path, double W, double H)> images)
         {
             string now = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.000Z");
-            string outlineOid = "{" + Guid.NewGuid().ToString().ToUpperInvariant() + "}{11}{B1}";
-            string oeOid = "{" + Guid.NewGuid().ToString().ToUpperInvariant() + "}{12}{C1}";
-            string ifOid = "{" + Guid.NewGuid().ToString().ToUpperInvariant() + "}{13}{D1}";
 
-            Log(string.Format("outlineOid: {0}, oeOid: {1}, ifOid: {2}", outlineOid, oeOid, ifOid));
+            // preferredName MUST NOT contain backslashes (or slashes) — bare filename only
+            name = (name ?? "").Replace("\\", "").Replace("/", "").Trim();
+            if (string.IsNullOrEmpty(name)) name = "document.pdf";
 
             string ifAttrs = "<one:InsertedFile pathSource=\"" + XmlEsc(pdf) + "\" preferredName=\"" + XmlEsc(name) + "\"";
             if (!string.IsNullOrEmpty(pathCache)) ifAttrs += " pathCache=\"" + XmlEsc(pathCache) + "\"";
-            ifAttrs += " objectID=\"" + ifOid + "\"/>";
-            return "<one:Outline objectID=\"" + outlineOid + "\"><one:OEChildren>" +
-                   "<one:OE creationTime=\"" + now + "\" lastModifiedTime=\"" + now + "\" objectID=\"" + oeOid + "\" alignment=\"left\">" +
-                   ifAttrs +
-                   "</one:OE></one:OEChildren></one:Outline>";
+            ifAttrs += "/>";
+
+            string oes = "<one:OE creationTime=\"" + now + "\" lastModifiedTime=\"" + now + "\" alignment=\"left\">" +
+                       ifAttrs +
+                       "</one:OE>";
+
+            // Page images as sibling OEs under the same outline.
+            // <one:Image> supplies its binary via <one:Data> (inline base64),
+            // with <one:Size> first (PageObject base), then the Data element.
+            if (images != null)
+            {
+                foreach (var img in images)
+                {
+                    string b64 = Convert.ToBase64String(File.ReadAllBytes(img.Path));
+                    string w = img.W.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
+                    string h = img.H.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
+                    oes += "<one:OE creationTime=\"" + now + "\" lastModifiedTime=\"" + now + "\" alignment=\"left\">" +
+                         "<one:Image isPrintOut=\"true\" backgroundImage=\"true\" format=\"auto\">" +
+                         "<one:Size width=\"" + w + "\" height=\"" + h + "\"/>" +
+                         "<one:Data>" + b64 + "</one:Data>" +
+                         "</one:Image></one:OE>";
+                }
+                Log("Emitting " + images.Count + " page-image one:Image OE(s) with inline base64 <one:Data>");
+            }
+
+            return "<one:Outline><one:OEChildren>" + oes + "</one:OEChildren></one:Outline>";
+        }
+
+        // ---------- PDF PAGE-IMAGE RASTERIZATION (PDFium) ----------
+        List<(string Name, byte[] Png)> Rasterize(string pdfPath, int dpi, int maxPages)
+        {
+            var pages = new List<(string, byte[])>();
+            using (var doc = PdfDocument.Load(pdfPath, null, null))
+            {
+                int count = Math.Min(doc.Pages.Count, maxPages);
+                for (int i = 0; i < count; i++)
+                {
+                    var pg = doc.Pages[i];
+                    var sz = doc.GetPageSizeByIndex(i);
+                    double scale = dpi / 72.0;
+                    int w = Math.Max(1, (int)(sz.Width * scale));
+                    int h = Math.Max(1, (int)(sz.Height * scale));
+                    using (var bmp = new PdfBitmap(w, h, true))
+                    {
+                        bmp.FillRect(0, 0, w, h, FS_COLOR.White);
+                        pg.Render(bmp, 0, 0, w, h, PageRotate.Normal, RenderFlags.FPDF_NONE);
+                        int stride = bmp.Stride;
+                        var raw = new byte[h * stride];
+                        System.Runtime.InteropServices.Marshal.Copy(bmp.Buffer, raw, 0, raw.Length);
+                        var rows = new MemoryStream();
+                        for (int y = 0; y < h; y++) { rows.WriteByte(0); rows.Write(raw, y * stride, stride); }
+                        pages.Add(("page" + (i + 1), PngWriter.Encode(rows.ToArray(), w, h)));
+                    }
+                }
+            }
+            return pages;
+        }
+
+        // Render all PDF pages to PNG files in a temp dir; return (file, width_pt, height_pt).
+        List<(string Path, double W, double H)> RenderPageImages(string pdf)
+        {
+            const int dpi = 150;
+            var pages = Rasterize(pdf, dpi, 9999);
+            var dir = Path.Combine(Path.GetTempPath(), "oneview_img_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            var result = new List<(string Path, double W, double H)>();
+            double scale = dpi / 72.0;
+            foreach (var p in pages)
+            {
+                string file = Path.Combine(dir, p.Name + ".png");
+                File.WriteAllBytes(file, p.Png);
+                int pw, ph;
+                using (var bmp = new System.Drawing.Bitmap(new MemoryStream(p.Png))) { pw = bmp.Width; ph = bmp.Height; }
+                double w = pw / scale, h = ph / scale;
+                result.Add((file, w, h));
+                Log(string.Format("Rendered {0}: {1}x{2}px -> one:Size {3:F0}x{4:F0}pt  [{5}]", p.Name, pw, ph, w, h, file));
+            }
+            return result;
+        }
+
+        // ---------- PNG ENCODER (8-bit RGBA, filter 0) ----------
+        static class PngWriter
+        {
+            public static byte[] Encode(byte[] rows, int width, int height)
+            {
+                using var idatMs = new MemoryStream();
+                using (var deflate = new System.IO.Compression.DeflateStream(idatMs, System.IO.Compression.CompressionLevel.Optimal, leaveOpen: true))
+                    deflate.Write(rows, 0, rows.Length);
+                var rawDeflate = idatMs.ToArray();
+                long adler = Adler32(rows);
+                var zlibPayload = new byte[rawDeflate.Length + 6];
+                zlibPayload[0] = 0x78; zlibPayload[1] = 0x9C;
+                Buffer.BlockCopy(rawDeflate, 0, zlibPayload, 2, rawDeflate.Length);
+                zlibPayload[zlibPayload.Length - 4] = (byte)(adler >> 24); zlibPayload[zlibPayload.Length - 3] = (byte)(adler >> 16);
+                zlibPayload[zlibPayload.Length - 2] = (byte)(adler >> 8);  zlibPayload[zlibPayload.Length - 1] = (byte)adler;
+
+                using var ms = new MemoryStream();
+                void W(byte[] b) => ms.Write(b, 0, b.Length);
+                void WBE32(int v) { W(new byte[] { (byte)(v >> 24), (byte)(v >> 16), (byte)(v >> 8), (byte)v }); }
+                void Chunk(string type, byte[] data)
+                {
+                    WBE32(data.Length);
+                    var tb = System.Text.Encoding.ASCII.GetBytes(type);
+                    W(tb); W(data);
+                    WBE32((int)Crc32(tb.Concat(data).ToArray()));
+                }
+                W(new byte[] { 0x89, (byte)'P', (byte)'N', (byte)'G', 0x0D, 0x0A, 0x1A, 0x0A });
+                var ihdr = new byte[13];
+                for (int k = 0; k < 4; k++) { ihdr[k] = (byte)(width >> (24 - 8 * k)); ihdr[4 + k] = (byte)(height >> (24 - 8 * k)); }
+                ihdr[8] = 8; ihdr[9] = 6;
+                Chunk("IHDR", ihdr);
+                Chunk("IDAT", zlibPayload);
+                Chunk("IEND", Array.Empty<byte>());
+                return ms.ToArray();
+            }
+            static long Adler32(byte[] data) { uint a = 1, b = 0; foreach (var x in data) { a = (a + x) % 65521; b = (b + a) % 65521; } return (b << 16) | a; }
+            static uint Crc32(byte[] data) { uint crc = 0xFFFFFFFF; foreach (var b in data) { crc ^= b; for (int i = 0; i < 8; i++) crc = (crc >> 1) ^ (0xEDB88320u & (uint)(-(crc & 1))); } return crc ^ 0xFFFFFFFF; }
         }
 
         void ShowInsertXml()
@@ -493,7 +609,7 @@ namespace OneNoteXmlViewer
             string name = string.IsNullOrEmpty(txtPreferredName.Text.Trim()) ? Path.GetFileName(pdf) : txtPreferredName.Text.Trim();
             if (string.IsNullOrEmpty(pdf)) { SetResult("Enter a pathSource file path first."); return; }
             SetResult("--- Injected block (not committed) ---");
-            SetResult(BuildInsertedFileBlock(pdf, name, ""));
+            SetResult(BuildInsertedFileBlock(pdf, name, "", null));
             Log("ShowInsertXml (no commit)");
         }
 
@@ -534,8 +650,16 @@ namespace OneNoteXmlViewer
                     }
                     catch (Exception e) { SetResult("pathCache copy fail: " + e.Message); }
                 }
-                // 3. Insert the InsertedFile block before </one:Page>
-                string block = BuildInsertedFileBlock(pdf, name, pathCache);
+                // 3. (Optional) render each PDF page to a PNG file
+                List<(string Path, double W, double H)> images = null;
+                if (chkImages != null && chkImages.Checked)
+                {
+                    try { images = RenderPageImages(pdf); }
+                    catch (Exception e) { LogException(e, "RenderPageImages"); SetResult("Render fail: " + e.Message); return; }
+                }
+
+                // 4. Insert the InsertedFile + image block before </one:Page>
+                string block = BuildInsertedFileBlock(pdf, name, pathCache, images);
                 int idx = xml.LastIndexOf("</one:Page>");
                 if (idx < 0) { SetResult("Cannot find </one:Page> to insert into."); return; }
                 string newXml = xml.Insert(idx, block);
