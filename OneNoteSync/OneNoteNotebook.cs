@@ -149,27 +149,20 @@ namespace OneNoteSync
             return id;
         }
 
-        /// <summary>Set a page's body to summary text only.</summary>
-        public void CommitPage(string pageId, string pageName, List<string> lines)
-        {
-            SetPageBody(pageId, string.Join("\n", lines), null, null, null, 150);
-        }
-
-        /// <summary>Set a page's body to summary + PDF attachment + rendered page images.</summary>
-        public void CommitPageFull(string pageId, string summary, string pdfPath,
+        /// <summary>Set a page's body to title + summary table + PDF attachment + rendered page images.</summary>
+        public void CommitPageFull(string pageId, string title, List<PageXml.AccountRow> rows, string pdfPath,
                                   List<(string Name, byte[] Png)> rasters, int dpi)
         {
-            SetPageBody(pageId, summary, pdfPath,
+            SetPageBody(pageId, title, rows, pdfPath,
                        string.IsNullOrEmpty(pdfPath) ? null : System.IO.Path.GetFileName(pdfPath),
                        rasters, dpi);
         }
 
         /// <summary>Set a page's body from pre-encoded binary (used by the test page).</summary>
         public (bool imgOk, bool fileOk, string note) TryCommitPageWithBinary(
-            string pageId, string pageName, List<string> lines,
+            string pageId, string title, List<PageXml.AccountRow> rows,
             string imgB64, int w, int h, string fileB64, string fileName)
         {
-            string summary = string.Join("\n", lines);
             // Rebuild an in-memory raster list from the supplied base64 (single image).
             var rasters = new List<(string Name, byte[] Png)>();
             if (!string.IsNullOrEmpty(imgB64))
@@ -187,12 +180,12 @@ namespace OneNoteSync
 
             try
             {
-                SetPageBody(pageId, summary, pdfPath,
+                SetPageBody(pageId, title, rows, pdfPath,
                            string.IsNullOrEmpty(pdfPath) ? null : System.IO.Path.GetFileName(pdfPath),
                            rasters, 150);
                 bool imgOk = rasters.Count > 0;
                 bool fileOk = !string.IsNullOrEmpty(pdfPath);
-                return (imgOk, fileOk, "Committed via UpdatePageContent (pathSource + inline base64 image).");
+                return (imgOk, fileOk, "Committed via UpdatePageContent (table + pathSource + inline base64 image).");
             }
             catch (Exception e)
             {
@@ -202,7 +195,7 @@ namespace OneNoteSync
 
         // ---------------------------------------------------------------- internals
 
-        void SetPageBody(string pageId, string summary, string pdfPath, string pdfName,
+        void SetPageBody(string pageId, string title, List<PageXml.AccountRow> rows, string pdfPath, string pdfName,
                         List<(string Name, byte[] Png)> rasters, int dpi)
         {
             //try { _app.Navigate(pageId); } catch { }
@@ -210,7 +203,7 @@ namespace OneNoteSync
             string xml = _app.GetPage(pageId, 0); // piBasic
             if (string.IsNullOrEmpty(xml))
                 throw new Exception("GetPageContent returned empty for page " + pageId);
-            string body = PageXml.BuildBody(summary, pdfPath, pdfName, rasters, dpi);
+            string body = PageXml.BuildBody(title, rows, pdfPath, pdfName, rasters, dpi);
             int idx = xml.LastIndexOf("</one:Page>");
             if (idx < 0) throw new Exception("No </one:Page> in page XML");
             string newXml = xml.Insert(idx, body);

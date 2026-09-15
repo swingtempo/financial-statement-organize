@@ -744,13 +744,10 @@ public sealed class MainForm : Form
                 var sec = ResolveSection(onenote!, ref h!, entry, year, rr.Notebook, rr.Title, rr.Target.Parent);
                 Log($"    -> [{sec.Notebook}] {sec.Name} / {pageName}");
                 string pageId = onenote!.CreateNote(sec.ObjectID, pageName);
-                // Page title first (it becomes the OneNote page title), then the
-                // combined summary of every account in the file, on one page.
-                var lines = new List<string> { pageName };
-                lines.AddRange(Core.BuildFileSummary(f));
-                string summary = string.Join("\n", lines);
+                // Title line (becomes the OneNote page title), then a table with one row per account.
+                var accRows = Core.BuildAccountRows(f);
                 var rasters = PdfTools.Rasterize(pdf, dpi, maxPages);
-                onenote.CommitPageFull(pageId, summary, pdf, rasters, dpi);
+                onenote.CommitPageFull(pageId, pageName, accRows, pdf, rasters, dpi);
                 made++;
                 Log($"    created + content set ({rasters.Count} image(s), {f.Statements.Count} account(s)).");
             }
@@ -797,34 +794,40 @@ public sealed class MainForm : Form
         Log($"Creating test page in [{sec.Notebook}] {sec.Name} ...");
         string pageId = onenote.CreateNote(sec.ObjectID, pageName);
 
-        var lines = new List<string>
+        var rows = new List<PageXml.AccountRow>
         {
-            "OneNoteSync test - sample account",
-            "Account: Example Checking (\u20261234)",
-            "Statement type: Monthly statement - issued June 30, 2026",
-            "Balance: $26,372.47",
-            "Opening balance: $23,056.08",
+            new PageXml.AccountRow
+            {
+                Date = "2026-06-30",
+                Name = "Example Checking (\u20261234)",
+                Balance = "$26,372.47",
+                Notes = new List<string>
+                {
+                    "Monthly statement - issued June 30, 2026",
+                    "Opening balance: $23,056.08",
+                }
+            }
         };
 
         // Generated gradient image so the printout path is exercised even without a PDF.
         int w = 600, ht = 200;
-        var rows = new byte[w * ht * 3];
+        var px = new byte[w * ht * 3];
         for (int y = 0; y < ht; y++)
             for (int x = 0; x < w; x++)
             {
                 int i = (y * w + x) * 3;
-                rows[i] = (byte)(x * 255 / w);
-                rows[i + 1] = (byte)(y * 255 / ht);
-                rows[i + 2] = 180;
+                px[i] = (byte)(x * 255 / w);
+                px[i + 1] = (byte)(y * 255 / ht);
+                px[i + 2] = 180;
             }
-        string imgB64 = Convert.ToBase64String(PngWriter.Encode(rows, w, ht));
+        string imgB64 = Convert.ToBase64String(PngWriter.Encode(px, w, ht));
 
         string? pdf = Core.FindFirstPdf(_outDir);
         string? fileB64 = null;
         if (pdf != null)
         {
             Log("Using real PDF for the test: " + pdf);
-            lines.Add("PDF: " + pdf);
+            rows[0].Notes.Add("PDF: " + pdf);
             fileB64 = Convert.ToBase64String(File.ReadAllBytes(pdf));
             var pages = PdfTools.Rasterize(pdf, Core.GetDpi(_env), 1);
             if (pages.Count > 0) imgB64 = Convert.ToBase64String(pages[0].Png);
@@ -832,7 +835,7 @@ public sealed class MainForm : Form
 
         Log("Committing (core always; binary is best-effort) ...");
         var (imgOk, fileOk, note) = onenote.TryCommitPageWithBinary(
-            pageId, pageName, lines, imgB64, w, ht, fileB64,
+            pageId, pageName, rows, imgB64, w, ht, fileB64,
             pdf != null ? Path.GetFileName(pdf) : null);
 
         Log($"Test done: page '{pageName}' in section '{sec.Name}'.");

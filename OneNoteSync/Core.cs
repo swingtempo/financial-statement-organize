@@ -88,8 +88,7 @@ public static class Core
 
     /// <summary>Build the OneNote page summary as plain text lines.</summary>
     public static List<string> BuildSummaryLines(StatementFile f, Statement st)
-    {
-        var lines = new List<string>();
+    {        var lines = new List<string>();
         lines.Add($"{(st.StatementDate?.ToString("yyyy-MM") ?? "Statement")} {f.Institution} - {st.AccountName}"
                  + (string.IsNullOrWhiteSpace(st.AccountNumber) ? "" : $" (\u2026{st.AccountNumber})"));
         lines.Add(st.StatementType +
@@ -107,6 +106,28 @@ public static class Core
     }
 
     public static string Money(decimal? v) => v.HasValue ? v.Value.ToString("N2") : "";
+
+    /// <summary>
+    /// Builds the per-account rows for the OneNote summary table (one row per
+    /// statement): Date | Account name | Balance | verbatim note lines.
+    /// </summary>
+    public static List<PageXml.AccountRow> BuildAccountRows(StatementFile f)
+    {
+        var rows = new List<PageXml.AccountRow>();
+        foreach (var st in f.Statements)
+        {
+            string date = (st.StatementDate ?? st.AsOfDate)?.ToString("yyyy-MM-dd") ?? "";
+            rows.Add(new PageXml.AccountRow
+            {
+                Date = date,
+                Name = st.AccountName
+                      + (string.IsNullOrWhiteSpace(st.AccountNumber) ? "" : $" (\u2026{st.AccountNumber})"),
+                Balance = Money(st.Balance),
+                Notes = st.Notes
+            });
+        }
+        return rows;
+    }
 
     public static string PageName(Statement st)
     {
