@@ -28,7 +28,7 @@ namespace OneNoteXmlViewer
         Microsoft.Office.Interop.OneNote.Application _app;
         TextBox txtSearch, txtPageId, txtXml, txtBinInfo, txtLog;
         TextBox txtPdfPath, txtPreferredName, txtInsertResult;
-        CheckBox chkPathCache, chkSyncAfter, chkImages;
+        CheckBox chkImages;
         ComboBox cboPages, cboPageInfo, cboWriteMethod;
         ListBox lstCallbacks;
         List<PageItem> _allPages = new List<PageItem>();
@@ -107,13 +107,8 @@ namespace OneNoteXmlViewer
             txtPreferredName = TB(984, 512, 168); Controls.Add(txtPreferredName);
             Controls.Add(Btn("Show XML only", 8, 548, 140, (s, e) => ShowInsertXml()));
             Controls.Add(Btn("Insert into page + verify", 154, 548, 200, (s, e) => DoInsert()));
-            Controls.Add(Btn("Probe ribbon", 940, 548, 130, (s, e) => ProbeRibbon()));
-            chkPathCache = new CheckBox { Text = "Also set pathCache (copy PDF to a local path)", Location = new Point(370, 548), AutoSize = true };
-            Controls.Add(chkPathCache);
-            chkImages = new CheckBox { Text = "Also insert each page as an image", Location = new Point(700, 548), AutoSize = true };
+            chkImages = new CheckBox { Text = "Also insert each page as an image", Location = new Point(370, 548), AutoSize = true, Checked = true };
             Controls.Add(chkImages);
-            chkSyncAfter = new CheckBox { Text = "Call SyncHierarchy after insert", Location = new Point(800, 512), AutoSize = true };
-            Controls.Add(chkSyncAfter);
             Controls.Add(Lbl("Result:", 8, 582));
             txtInsertResult = TB(8, 600, 1144, 60, mono: true); Controls.Add(txtInsertResult);
 
@@ -427,54 +422,8 @@ namespace OneNoteXmlViewer
             { if (ofd.ShowDialog() == DialogResult.OK) { txtPdfPath.Text = ofd.FileName; if (string.IsNullOrEmpty(txtPreferredName.Text)) txtPreferredName.Text = Path.GetFileName(ofd.FileName); } }
         }
 
-        // ---------- UI AUTOMATION PROBE ----------
-        [System.Runtime.InteropServices.DllImport("user32.dll")]
-        static extern bool SetForegroundWindow(System.IntPtr hWnd);
-        [System.Runtime.InteropServices.DllImport("user32.dll")]
-        static extern bool ShowWindow(System.IntPtr hWnd, int nCmdShow);
-
-        void ProbeRibbon()
-        {
-            try
-            {
-                var procs = Process.GetProcessesByName("ONENOTE");
-                if (procs.Length == 0) { Log("OneNote not running."); return; }
-                var p = procs[0];
-                System.IntPtr hwnd = p.MainWindowHandle;
-                Log("OneNote pid=" + p.Id + " hwnd=" + hwnd + " title='" + p.MainWindowTitle + "'");
-                if (hwnd == System.IntPtr.Zero) { Log("No main window handle — focus OneNote and retry."); return; }
-                ShowWindow(hwnd, 9); // SW_RESTORE
-                SetForegroundWindow(hwnd);
-                Thread.Sleep(800);
-                var root = System.Windows.Automation.AutomationElement.FromHandle(hwnd);
-                if (root == null) { Log("AutomationElement.FromHandle -> null"); return; }
-                Log("root: '" + root.Current.Name + "' class=" + root.Current.ClassName);
-                var children = root.FindAll(System.Windows.Automation.TreeScope.Children, System.Windows.Automation.Condition.TrueCondition);
-                Log("top-level children: " + children.Count);
-                int i = 0;
-                foreach (System.Windows.Automation.AutomationElement c in children)
-                {
-                    Log("  [" + i + "] '" + c.Current.Name + "' class=" + c.Current.ClassName);
-                    i++; if (i > 40) break;
-                }
-                foreach (string nm in new[] { "Insert", "File", "Attach" })
-                {
-                    var found = root.FindAll(System.Windows.Automation.TreeScope.Subtree,
-                        new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.NameProperty, nm));
-                    Log("elements named '" + nm + "': " + found.Count);
-                    int j = 0;
-                    foreach (System.Windows.Automation.AutomationElement f in found)
-                    {
-                        Log("   - '" + f.Current.Name + "' class=" + f.Current.ClassName);
-                        j++; if (j > 8) break;
-                    }
-                }
-            }
-            catch (Exception e) { LogException(e, "ProbeRibbon"); }
-        }
-
         // ---------- PDF INSERT TEST ----------
-        string BuildInsertedFileBlock(string pdf, string name, string pathCache, List<(string Path, double W, double H)> images)
+        string BuildInsertedFileBlock(string pdf, string name, List<(string Path, double W, double H)> images)
         {
             string now = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.000Z");
 
@@ -482,9 +431,7 @@ namespace OneNoteXmlViewer
             name = (name ?? "").Replace("\\", "").Replace("/", "").Trim();
             if (string.IsNullOrEmpty(name)) name = "document.pdf";
 
-            string ifAttrs = "<one:InsertedFile pathSource=\"" + XmlEsc(pdf) + "\" preferredName=\"" + XmlEsc(name) + "\"";
-            if (!string.IsNullOrEmpty(pathCache)) ifAttrs += " pathCache=\"" + XmlEsc(pathCache) + "\"";
-            ifAttrs += "/>";
+            string ifAttrs = "<one:InsertedFile pathSource=\"" + XmlEsc(pdf) + "\" preferredName=\"" + XmlEsc(name) + "\"/>";
 
             string oes = "<one:OE creationTime=\"" + now + "\" lastModifiedTime=\"" + now + "\" alignment=\"left\">" +
                        ifAttrs +
@@ -609,7 +556,7 @@ namespace OneNoteXmlViewer
             string name = string.IsNullOrEmpty(txtPreferredName.Text.Trim()) ? Path.GetFileName(pdf) : txtPreferredName.Text.Trim();
             if (string.IsNullOrEmpty(pdf)) { SetResult("Enter a pathSource file path first."); return; }
             SetResult("--- Injected block (not committed) ---");
-            SetResult(BuildInsertedFileBlock(pdf, name, "", null));
+            SetResult(BuildInsertedFileBlock(pdf, name, null));
             Log("ShowInsertXml (no commit)");
         }
 
@@ -635,22 +582,7 @@ namespace OneNoteXmlViewer
                 beforeIf = Regex.Matches(xml, "<one:InsertedFile").Count;
                 beforeCache = Regex.Match(xml, "pathCache=\"([^\"]*)\"").Groups[1].Value;
 
-                // 2. (Optional) copy the PDF to a local path for pathCache
-                string pathCache = "";
-                if (chkPathCache != null && chkPathCache.Checked)
-                {
-                    try
-                    {
-                        string cacheDir = Path.Combine(Path.GetTempPath(), "oneview_cache");
-                        Directory.CreateDirectory(cacheDir);
-                        string cacheFile = Path.Combine(cacheDir, Guid.NewGuid().ToString("N") + "_" + Path.GetFileName(pdf));
-                        File.Copy(pdf, cacheFile, true);
-                        pathCache = cacheFile;
-                        Log("Copied PDF to pathCache: " + cacheFile);
-                    }
-                    catch (Exception e) { SetResult("pathCache copy fail: " + e.Message); }
-                }
-                // 3. (Optional) render each PDF page to a PNG file
+                // 2. (Optional) render each PDF page to a PNG file
                 List<(string Path, double W, double H)> images = null;
                 if (chkImages != null && chkImages.Checked)
                 {
@@ -658,8 +590,8 @@ namespace OneNoteXmlViewer
                     catch (Exception e) { LogException(e, "RenderPageImages"); SetResult("Render fail: " + e.Message); return; }
                 }
 
-                // 4. Insert the InsertedFile + image block before </one:Page>
-                string block = BuildInsertedFileBlock(pdf, name, pathCache, images);
+                // 3. Insert the InsertedFile + image block before </one:Page>
+                string block = BuildInsertedFileBlock(pdf, name, images);
                 int idx = xml.LastIndexOf("</one:Page>");
                 if (idx < 0) { SetResult("Cannot find </one:Page> to insert into."); return; }
                 string newXml = xml.Insert(idx, block);
@@ -672,13 +604,6 @@ namespace OneNoteXmlViewer
                 Thread.Sleep(1000);
                 string wres = UpdateVia(newXml);
                 bool ok = wres.EndsWith("OK");
-
-                // 3b. (Optional) trigger a sync so OneNote processes the pending file reference
-                if (chkSyncAfter != null && chkSyncAfter.Checked)
-                {
-                    try { _app.SyncHierarchy(""); Log("SyncHierarchy(\"\") called"); }
-                    catch (Exception e) { Log("SyncHierarchy fail: " + Err(e)); }
-                }
 
                 // 4. Wait for OneNote to ingest, then reload
                 Log("Waiting 4s for OneNote to ingest the file...");
