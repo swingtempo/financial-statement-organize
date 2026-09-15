@@ -34,11 +34,6 @@
     <Reference Include="System.Drawing" />
   </ItemGroup>
 
-  <ItemGroup>
-    <!-- Late-bound OneNote page-writer helper (used when the PIA early-bound
-         UpdatePageContent overloads are misaligned). Copied next to the exe. -->
-    <None Include="OneNoteUpdate.ps1" CopyToOutputDirectory="PreserveNewest" />
-  </ItemGroup>
 
 </Project>
 

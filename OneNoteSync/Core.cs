@@ -117,6 +117,10 @@ public static class Core
     public static int GetDpi(Dictionary<string, string> env)
         => int.TryParse(EnvFile.Get(env, "PDF_DPI", "150"), out int d) ? d : 150;
 
+    /// <summary>Max pages to render as images (PDF_MAX_PAGES, default 5).</summary>
+    public static int GetMaxPages(Dictionary<string, string> env)
+        => int.TryParse(EnvFile.Get(env, "PDF_MAX_PAGES", "5"), out int m) ? m : 5;
+
     public static void LaunchOneNote(Action<string>? log = null)
     {
         try

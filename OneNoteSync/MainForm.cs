@@ -87,6 +87,23 @@ public sealed class MainForm : Form
         Console.SetOut(cw);
         Console.SetError(cw);
         LoadData();
+        // Auto-load OneNote at boot (per request): launch OneNote if needed, connect,
+        // load the hierarchy, and refresh the grid — no manual "Reload OneNote" click.
+        // Runs on a background STA thread so it doesn't block the UI; the connect-retry
+        // in OneNoteApp rides out a slow OneNote start.
+        _ = System.Threading.Tasks.Task.Run(() =>
+        {
+            RunSta(() =>
+            {
+                try
+                {
+                    Log("[boot] Auto-loading OneNote ...");
+                    DoReloadOneNote();
+                    Log("[boot] OneNote auto-load done.");
+                }
+                catch (Exception e) { Log("[boot] OneNote auto-load issue: " + e.Message); }
+            });
+        });
         Shown += (_, _) => FlushPendingLog();
     }
 
@@ -265,10 +282,24 @@ public sealed class MainForm : Form
     private void RefreshTargetOptions()
     {
         _colTarget.Items.Clear();
-        if (_hierarchy == null) return;
         string nb = SelectedNotebook();
-        if (nb == "") return;
-        var list = BuildAllOptions().Where(o => o.Notebook == nb).ToList();
+        var list = new List<TargetOption>();
+        if (_hierarchy != null && nb != "")
+            list.AddRange(BuildAllOptions().Where(o => o.Notebook == nb));
+        // Ensure mapped targets are valid options even if they don't exist in
+        // OneNote yet (they will be created on run). This keeps the combo cell
+        // value valid (and avoids the "value is not valid" DataError).
+        if (nb != "")
+        {
+            foreach (var kv in _map.Institutions)
+            {
+                var e = kv.Value;
+                if (string.IsNullOrWhiteSpace(e.Name)) continue;
+                var kind = e.Kind == "group" ? "group" : "section";
+                if (!list.Any(o => string.Equals(o.Name, e.Name, StringComparison.OrdinalIgnoreCase) && o.Kind == kind))
+                    list.Add(new TargetOption(e.Name, kind, nb));
+            }
+        }
         SortOptions(list);
         _colTarget.Items.AddRange(list.ToArray());
     }
@@ -464,6 +495,20 @@ public sealed class MainForm : Form
         return maps;
     }
 
+    /// <summary>Read the selected notebook name on the UI thread.</summary>
+    private string SnapshotNotebook()
+    {
+        string nb = "";
+        try
+        {
+            if (_log == null || !_log.IsHandleCreated) return nb;
+            if (_log.InvokeRequired) _log.Invoke(new Action(() => nb = SelectedNotebook()));
+            else nb = SelectedNotebook();
+        }
+        catch { }
+        return nb;
+    }
+
     // ------------------------------------------------------------------
     // Background execution (STA thread, since OneNote COM is STA)
     // ------------------------------------------------------------------
@@ -576,6 +621,7 @@ public sealed class MainForm : Form
         }
 
         int made = 0, skipped = 0, noTarget = 0;
+        string notebook = SnapshotNotebook();
         Log($"Importing {_files.Count} file(s) {(dryRun ? "(dry run)" : "into OneNote")}");
 
         foreach (var f in _files.Where(f => !f.Error && f.Statements.Count > 0))
@@ -597,6 +643,9 @@ public sealed class MainForm : Form
                 continue;
             }
 
+            int dpi = Core.GetDpi(_env);
+            int maxPages = Core.GetMaxPages(_env);
+
             foreach (var st in f.Statements)
             {
                 int year = st.StatementDate?.Year ?? DateTime.Now.Year;
@@ -610,13 +659,25 @@ public sealed class MainForm : Form
                 }
 
                 Log($"  {f.FileName} :: {st.AccountName}");
-                var sec = ResolveSection(onenote!, ref h!, entry, year);
-                Log($"    -> [{sec.Notebook}] {sec.Name} / {pageName}");
-                string pageId = onenote!.CreateNote(sec.Guid);
-                var lines = Core.BuildSummaryLines(f, st);
-                lines.Add("PDF: " + pdf);
-                onenote.CommitPage(pageId, pageName, lines);
-                made++;
+                try
+                {
+                    var sec = ResolveSection(onenote!, ref h!, entry, year, notebook);
+                    Log($"    -> [{sec.Notebook}] {sec.Name} / {pageName}");
+                    string pageId = onenote!.CreateNote(sec.Guid, pageName);
+                    var lines = Core.BuildSummaryLines(f, st);
+                    string summary = string.Join("\n", lines);
+                    var rasters = PdfTools.Rasterize(pdf, dpi, maxPages);
+                    onenote.CommitPageFull(pageId, summary, pdf, rasters, dpi);
+                    made++;
+                    Log($"    created + content set ({rasters.Count} image(s)).");
+                }
+                catch (Exception e)
+                {
+                    Log("    FAILED: " + e.Message, error: true);
+                    if (e is System.Runtime.InteropServices.COMException ce)
+                        Log("      HRESULT 0x" + ce.HResult.ToString("X8") + " (0x80042004 = OneNote write lock — try the local 'StatementsAll' notebook or reset OneDrive sync)", error: true);
+                    skipped++;
+                }
             }
         }
 
@@ -650,7 +711,7 @@ public sealed class MainForm : Form
         var sec = _hierarchy.Sections[0];
         string pageName = "OneNoteSync test " + DateTime.Now.ToString("yy-MM-dd HH:mm");
         Log($"Creating test page in [{sec.Notebook}] {sec.Name} ...");
-        string pageId = onenote.CreateNote(sec.Guid);
+        string pageId = onenote.CreateNote(sec.Guid, pageName);
 
         var lines = new List<string>
         {
@@ -704,7 +765,7 @@ public sealed class MainForm : Form
     /// Resolve (and create, if needed) the target section for a mapping entry.
     /// For a group mapping, the section is "{group} {year}".
     /// </summary>
-    private static SectionInfo ResolveSection(OneNote onenote, ref Hierarchy h, MapEntry entry, int year)
+    private static SectionInfo ResolveSection(OneNote onenote, ref Hierarchy h, MapEntry entry, int year, string notebook)
     {
         if (entry.Kind == "group")
         {
@@ -715,7 +776,7 @@ public sealed class MainForm : Form
             var existing = h.Sections.FirstOrDefault(s => s.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
             if (existing != null) return existing;
 
-            onenote.CreateSectionInGroup(name, g.Guid);
+            onenote.CreateSectionInGroup(name, g.Guid, g.Notebook);
             h = onenote.GetHierarchy();
             return h.Sections.First(s => s.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
         }
@@ -723,10 +784,12 @@ public sealed class MainForm : Form
         var sec = h.Sections.FirstOrDefault(s => s.Name.Equals(entry.Name, StringComparison.OrdinalIgnoreCase));
         if (sec != null) return sec;
 
-        onenote.CreateSection(entry.Name);
+        onenote.CreateSection(entry.Name, string.IsNullOrEmpty(notebook) ? secNotebookFallback(h) : notebook);
         h = onenote.GetHierarchy();
         return h.Sections.First(s => s.Name.Equals(entry.Name, StringComparison.OrdinalIgnoreCase));
     }
+
+    static string secNotebookFallback(Hierarchy h) => h.Sections.FirstOrDefault()?.Notebook ?? "";
 
     private void SaveMappingFromGrid(bool silent = false)
     {
