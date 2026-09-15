@@ -21,8 +21,15 @@ namespace OneNoteSync
         public string Parent { get; set; } = "";   // containing notebook name
     }
 
+    public sealed class NotebookInfo
+    {
+        public string Name { get; set; } = "";
+        public string ObjectID { get; set; } = "";
+    }
+
     public sealed class Hierarchy
     {
+        public List<NotebookInfo> Notebooks { get; } = new();
         public List<SectionInfo> Sections { get; } = new();
         public List<GroupInfo> Groups { get; } = new();
     }
@@ -62,7 +69,8 @@ namespace OneNoteSync
                 {
                     string nbName = (string)nb.Attribute("name") ?? "";
                     string nbId = (string)nb.Attribute("ID") ?? (string)nb.Attribute("objectID") ?? "";
-  
+                    h.Notebooks.Add(new NotebookInfo { Name = nbName, ObjectID = nbId });
+
                     // Sections that are DIRECT children of the notebook (no containing group).
                     foreach (var sec in nb.Elements().Where(e => e.Name.LocalName == "Section"))
                     {

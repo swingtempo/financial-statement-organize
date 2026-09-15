@@ -855,14 +855,15 @@ public sealed class MainForm : Form
     {
         if (entry.Kind == "group")
         {
-            var g = h.Groups.FirstOrDefault(g => g.Name.Equals(entry.Name, StringComparison.OrdinalIgnoreCase) && SameParent(g.Parent, notebook))
-                  ?? h.Groups.FirstOrDefault(g => g.Name.Equals(entry.Name, StringComparison.OrdinalIgnoreCase))
+            string notebookId = NotebookId(h, notebook);
+            var g = h.Groups.FirstOrDefault(x => x.Name.Equals(entry.Name, StringComparison.OrdinalIgnoreCase) && SameParent(x.Parent, notebookId))
+                  ?? h.Groups.FirstOrDefault(x => x.Name.Equals(entry.Name, StringComparison.OrdinalIgnoreCase))
                   ?? throw new Exception($"Section group \"{entry.Name}\" no longer exists in OneNote.");
             string baseName = string.IsNullOrWhiteSpace(title) ? entry.Name : title.Trim();
             string name = $"{baseName} {year}";
 
-            // The section must live inside THIS group (Parent = group name).
-            var existing = h.Sections.FirstOrDefault(s => s.Name.Equals(name, StringComparison.OrdinalIgnoreCase) && SameParent(s.Parent, entry.Name));
+            // The section must live inside THIS group (Parent = group ObjectID).
+            var existing = h.Sections.FirstOrDefault(s => s.Name.Equals(name, StringComparison.OrdinalIgnoreCase) && SameParent(s.Parent, g.ObjectID));
             if (existing != null) return existing;
 
             // Best-effort create. Section creation is often blocked (0x80042004);
@@ -876,7 +877,7 @@ public sealed class MainForm : Form
             {
                 throw new Exception($"Could not create section \"{name}\" in group \"{entry.Name}\" ({e.Message}). Create it manually in OneNote and re-run.");
             }
-            var created = h.Sections.FirstOrDefault(s => s.Name.Equals(name, StringComparison.OrdinalIgnoreCase) && SameParent(s.Parent, entry.Name));
+            var created = h.Sections.FirstOrDefault(s => s.Name.Equals(name, StringComparison.OrdinalIgnoreCase) && SameParent(s.Parent, g.ObjectID));
             if (created != null) return created;
             throw new Exception($"Section \"{name}\" was not created in group \"{entry.Name}\". Create it manually in OneNote and re-run.");
         }
@@ -893,8 +894,8 @@ public sealed class MainForm : Form
                 onenote.CreateSection(entry.Name, string.IsNullOrEmpty(notebook) ? secNotebookFallback(h) : notebook);
             else
             {
-                var g = h.Groups.FirstOrDefault(x => x.Name.Equals(parent, StringComparison.OrdinalIgnoreCase))
-                      ?? throw new Exception($"Section group \"{parent}\" not found (needed to create section \"{entry.Name}\").");
+                var g = h.Groups.FirstOrDefault(x => SameParent(x.ObjectID, parent))
+                      ?? throw new Exception($"Section group (ObjectID {parent}) not found (needed to create section \"{entry.Name}\").");
                 onenote.CreateSectionInGroup(entry.Name, g);
             }
             h = onenote.GetHierarchy();
@@ -913,6 +914,13 @@ public sealed class MainForm : Form
         a = string.IsNullOrEmpty(a) ? "" : a!;
         b = string.IsNullOrEmpty(b) ? "" : b!;
         return string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Resolve a notebook name to its ObjectID ("" if not in the hierarchy).</summary>
+    static string NotebookId(Hierarchy h, string name)
+    {
+        if (string.IsNullOrEmpty(name)) return "";
+        return h.Notebooks.FirstOrDefault(n => n.Name.Equals(name, StringComparison.OrdinalIgnoreCase))?.ObjectID ?? "";
     }
 
     static string secNotebookFallback(Hierarchy h) => h.Sections.FirstOrDefault()?.Notebook ?? "";
