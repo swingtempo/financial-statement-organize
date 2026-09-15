@@ -31,6 +31,7 @@ public sealed class MainForm : Form
     private Button _btnTest = null!;
     private Button _btnRun = null!;
     private Button _btnStop = null!;
+    private Button _btnToggleAll = null!;
     private Button _btnSave = null!;
     private Button _btnClear = null!;
     private Label _info = null!;
@@ -57,23 +58,29 @@ public sealed class MainForm : Form
         public string Name { get; }
         public string Kind { get; }        // "section" or "group"
         public string Notebook { get; }
-        public TargetOption(string name, string kind, string notebook)
+        public string Parent { get; }      // containing section-group (for sections; the notebook for groups)
+        public TargetOption(string name, string kind, string notebook, string parent = "")
         {
-            Name = name; Kind = kind; Notebook = notebook;
+            Name = name; Kind = kind; Notebook = notebook; Parent = parent;
         }
         public override string ToString()
         {
             string nb = string.IsNullOrEmpty(Notebook) ? "" : $"  ({Notebook})";
             return Kind == "group" ? $"[GROUP] {Name}{nb}" : $"[SECTION] {Name}{nb}";
         }
-        // Value equality (Name + Kind). The combo cell holds an instance built by one
-        // list and the Items hold instances built by another; reference equality would
-        // make the grid report "value is not valid". Comparing by Name + Kind fixes that.
+        // Value equality (Name + Kind + Notebook + Parent). The combo cell holds an
+        // instance built by one list and the Items hold instances built by another;
+        // reference equality would make the grid report "value is not valid".
+        // Including Notebook + Parent disambiguates same-name sections in different
+        // groups / notebooks.
         public override bool Equals(object? obj)
         {
             if (ReferenceEquals(this, obj)) return true;
             if (obj is not TargetOption other) return false;
-            return string.Equals(Name, other.Name, StringComparison.OrdinalIgnoreCase) && Kind == other.Kind;
+            return string.Equals(Name, other.Name, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(Kind, other.Kind, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(Notebook ?? "", other.Notebook ?? "", StringComparison.OrdinalIgnoreCase)
+                && string.Equals(Parent ?? "", other.Parent ?? "", StringComparison.OrdinalIgnoreCase);
         }
         public override int GetHashCode()
         {
@@ -81,6 +88,8 @@ public sealed class MainForm : Form
             {
                 int h = (Name ?? "").GetHashCode();
                 h = (h * 397) ^ (Kind ?? "").GetHashCode();
+                h = (h * 397) ^ (Notebook ?? "").GetHashCode();
+                h = (h * 397) ^ (Parent ?? "").GetHashCode();
                 return h;
             }
         }
@@ -142,6 +151,8 @@ public sealed class MainForm : Form
         _btnStop = AddButton(_top, "Stop", ref x);
         _btnStop.Click += (_, _) => { _cts?.Cancel(); Log("Stop requested — finishing the current page, then stopping."); };
         _btnStop.Enabled = false;
+        _btnToggleAll = AddButton(_top, "Toggle all", ref x);
+        _btnToggleAll.Click += (_, _) => ToggleAll();
         _btnSave = AddButton(_top, "Save mapping", ref x);
         _btnSave.Click += (_, _) => SaveMappingFromGrid();
         _btnClear = AddButton(_top, "Clear log", ref x);
@@ -273,9 +284,13 @@ public sealed class MainForm : Form
             string nb = "";
             if (_map.Institutions.TryGetValue(inst, out var e) && !string.IsNullOrWhiteSpace(e.Name))
             {
-                opt = all.FirstOrDefault(o => o.Name.Equals(e.Name, StringComparison.OrdinalIgnoreCase) && o.Kind == e.Kind);
+                // Match by Name + Kind + Parent so a same-name section in a different
+                // group resolves to the mapped one.
+                opt = all.FirstOrDefault(o => o.Name.Equals(e.Name, StringComparison.OrdinalIgnoreCase)
+                    && o.Kind == e.Kind
+                    && o.Parent.Equals(e.Parent ?? "", StringComparison.OrdinalIgnoreCase));
                 if (opt == null)
-                    opt = new TargetOption(e.Name, e.Kind == "group" ? "group" : "section", e.Notebook);
+                    opt = new TargetOption(e.Name, e.Kind == "group" ? "group" : "section", e.Notebook, e.Parent);
                 nb = e.Notebook;
             }
             // Per-file settings: enabled + title (default title = institution).
@@ -310,8 +325,9 @@ public sealed class MainForm : Form
             var e = kv.Value;
             if (string.IsNullOrWhiteSpace(e.Name)) continue;
             var kind = e.Kind == "group" ? "group" : "section";
-            if (!list.Any(o => string.Equals(o.Name, e.Name, StringComparison.OrdinalIgnoreCase) && o.Kind == kind))
-                list.Add(new TargetOption(e.Name, kind, e.Notebook));
+            if (!list.Any(o => string.Equals(o.Name, e.Name, StringComparison.OrdinalIgnoreCase) && o.Kind == kind
+                && string.Equals(o.Parent, e.Parent ?? "", StringComparison.OrdinalIgnoreCase)))
+                list.Add(new TargetOption(e.Name, kind, e.Notebook, e.Parent));
         }
         if (!string.IsNullOrEmpty(notebook))
             list = list.Where(o => o.Notebook == notebook).ToList();
@@ -369,9 +385,11 @@ public sealed class MainForm : Form
         var list = new List<TargetOption>();
         if (_hierarchy == null) return list;
         foreach (var g in _hierarchy.Groups)
-            if (g.Name != "OneNote_RecycleBin") list.Add(new TargetOption(g.Name, "group", g.Notebook));
+            if (!g.Name.StartsWith("OneNote_RecycleBin", StringComparison.OrdinalIgnoreCase))
+                list.Add(new TargetOption(g.Name, "group", g.Notebook, g.Parent));
         foreach (var s in _hierarchy.Sections)
-            if (s.Name != "OneNote_RecycleBin") list.Add(new TargetOption(s.Name, "section", s.Notebook));
+            if (!s.Name.StartsWith("OneNote_RecycleBin", StringComparison.OrdinalIgnoreCase))
+                list.Add(new TargetOption(s.Name, "section", s.Notebook, s.Parent));
         return list;
     }
 
@@ -723,9 +741,9 @@ public sealed class MainForm : Form
             try
             {
                 var entry = new MapEntry { Kind = rr.Target.Kind, Name = rr.Target.Name };
-                var sec = ResolveSection(onenote!, ref h!, entry, year, rr.Notebook, rr.Title);
+                var sec = ResolveSection(onenote!, ref h!, entry, year, rr.Notebook, rr.Title, rr.Target.Parent);
                 Log($"    -> [{sec.Notebook}] {sec.Name} / {pageName}");
-                string pageId = onenote!.CreateNote(sec.Guid, pageName);
+                string pageId = onenote!.CreateNote(sec.ObjectID, pageName);
                 // Page title first (it becomes the OneNote page title), then the
                 // combined summary of every account in the file, on one page.
                 var lines = new List<string> { pageName };
@@ -777,7 +795,7 @@ public sealed class MainForm : Form
         var sec = _hierarchy.Sections[0];
         string pageName = "OneNoteSync test " + DateTime.Now.ToString("yy-MM-dd HH:mm");
         Log($"Creating test page in [{sec.Notebook}] {sec.Name} ...");
-        string pageId = onenote.CreateNote(sec.Guid, pageName);
+        string pageId = onenote.CreateNote(sec.ObjectID, pageName);
 
         var lines = new List<string>
         {
@@ -830,53 +848,94 @@ public sealed class MainForm : Form
     /// <summary>
     /// Resolve (and create, best-effort) the target section for a mapping entry.
     /// For a group mapping, the section is "{Title} {year}" (created in the group if needed).
+    /// Section targets are disambiguated by their containing group (Parent), because the
+    /// same section name can exist in different groups.
     /// </summary>
-    private static SectionInfo ResolveSection(OneNote onenote, ref Hierarchy h, MapEntry entry, int year, string notebook, string title)
+    private static SectionInfo ResolveSection(OneNote onenote, ref Hierarchy h, MapEntry entry, int year, string notebook, string title, string parent)
     {
         if (entry.Kind == "group")
         {
-            var g = h.Groups.FirstOrDefault(g => g.Name.Equals(entry.Name, StringComparison.OrdinalIgnoreCase))
+            var g = h.Groups.FirstOrDefault(g => g.Name.Equals(entry.Name, StringComparison.OrdinalIgnoreCase) && SameParent(g.Parent, notebook))
+                  ?? h.Groups.FirstOrDefault(g => g.Name.Equals(entry.Name, StringComparison.OrdinalIgnoreCase))
                   ?? throw new Exception($"Section group \"{entry.Name}\" no longer exists in OneNote.");
             string baseName = string.IsNullOrWhiteSpace(title) ? entry.Name : title.Trim();
             string name = $"{baseName} {year}";
 
-            var existing = h.Sections.FirstOrDefault(s => s.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+            // The section must live inside THIS group (Parent = group name).
+            var existing = h.Sections.FirstOrDefault(s => s.Name.Equals(name, StringComparison.OrdinalIgnoreCase) && SameParent(s.Parent, entry.Name));
             if (existing != null) return existing;
 
             // Best-effort create. Section creation is often blocked (0x80042004);
             // if it fails, give a clear, actionable message.
             try
             {
-                onenote.CreateSectionInGroup(name, g.Guid, g.Notebook);
+                onenote.CreateSectionInGroup(name, g);
                 h = onenote.GetHierarchy();
             }
             catch (Exception e)
             {
                 throw new Exception($"Could not create section \"{name}\" in group \"{entry.Name}\" ({e.Message}). Create it manually in OneNote and re-run.");
             }
-            var created = h.Sections.FirstOrDefault(s => s.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+            var created = h.Sections.FirstOrDefault(s => s.Name.Equals(name, StringComparison.OrdinalIgnoreCase) && SameParent(s.Parent, entry.Name));
             if (created != null) return created;
             throw new Exception($"Section \"{name}\" was not created in group \"{entry.Name}\". Create it manually in OneNote and re-run.");
         }
 
-        var sec = h.Sections.FirstOrDefault(s => s.Name.Equals(entry.Name, StringComparison.OrdinalIgnoreCase));
+        // Section target — disambiguate by containing group (Parent).
+        var sec = h.Sections.FirstOrDefault(s => s.Name.Equals(entry.Name, StringComparison.OrdinalIgnoreCase) && SameParent(s.Parent, parent));
         if (sec != null) return sec;
 
+        // Not present: create it. If the target is inside a group (parent set), create it
+        // there; otherwise create it directly under the notebook.
         try
         {
-            onenote.CreateSection(entry.Name, string.IsNullOrEmpty(notebook) ? secNotebookFallback(h) : notebook);
+            if (string.IsNullOrEmpty(parent))
+                onenote.CreateSection(entry.Name, string.IsNullOrEmpty(notebook) ? secNotebookFallback(h) : notebook);
+            else
+            {
+                var g = h.Groups.FirstOrDefault(x => x.Name.Equals(parent, StringComparison.OrdinalIgnoreCase))
+                      ?? throw new Exception($"Section group \"{parent}\" not found (needed to create section \"{entry.Name}\").");
+                onenote.CreateSectionInGroup(entry.Name, g);
+            }
             h = onenote.GetHierarchy();
         }
         catch (Exception e)
         {
             throw new Exception($"Could not create section \"{entry.Name}\" ({e.Message}). Create it manually in OneNote and re-run.");
         }
-        var createdSec = h.Sections.FirstOrDefault(s => s.Name.Equals(entry.Name, StringComparison.OrdinalIgnoreCase));
+        var createdSec = h.Sections.FirstOrDefault(s => s.Name.Equals(entry.Name, StringComparison.OrdinalIgnoreCase) && SameParent(s.Parent, parent));
         if (createdSec != null) return createdSec;
         throw new Exception($"Section \"{entry.Name}\" was not created. Create it manually in OneNote and re-run.");
     }
 
+    static bool SameParent(string? a, string? b)
+    {
+        a = string.IsNullOrEmpty(a) ? "" : a!;
+        b = string.IsNullOrEmpty(b) ? "" : b!;
+        return string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+    }
+
     static string secNotebookFallback(Hierarchy h) => h.Sections.FirstOrDefault()?.Notebook ?? "";
+
+    /// <summary>
+    /// Toggle the "On" column of every file row: if all are ON, turn all OFF;
+    /// otherwise turn all ON.
+    /// </summary>
+    private void ToggleAll()
+    {
+        if (_grid.Rows.Count == 0) return;
+        bool allOn = true;
+        foreach (DataGridViewRow r in _grid.Rows)
+            if (!(r.Cells[_colEnabled.Index].Value is bool b && b)) { allOn = false; break; }
+        _updating = true;
+        try
+        {
+            foreach (DataGridViewRow r in _grid.Rows)
+                r.Cells[_colEnabled.Index].Value = !allOn;
+            Log($"All file rows set to {(allOn ? "OFF" : "ON")} ({_grid.Rows.Count} rows).");
+        }
+        finally { _updating = false; }
+    }
 
     private void SaveMappingFromGrid(bool silent = false)
     {
@@ -906,6 +965,7 @@ public sealed class MainForm : Form
                     Kind = opt.Kind,
                     Name = opt.Name,
                     Notebook = string.IsNullOrEmpty(nb) ? opt.Notebook : nb,
+                    Parent = opt.Parent,
                 };
             }
         }

@@ -19,6 +19,8 @@ public sealed class MapEntry
     public string Name { get; set; } = "";
     /// <summary>The notebook this institution maps to (per-institution, replaces the global notebook).</summary>
     public string Notebook { get; set; } = "";
+    /// <summary>Containing section-group name (disambiguates same-name sections in different groups; "" for top-level).</summary>
+    public string Parent { get; set; } = "";
 }
 
 /// <summary>Per-file (per-statement) settings: whether to process it and its page title.</summary>

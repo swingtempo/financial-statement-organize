@@ -8,15 +8,17 @@ namespace OneNoteSync
     public sealed class SectionInfo
     {
         public string Name { get; set; } = "";
-        public string Guid { get; set; } = "";
+        public string ObjectID { get; set; } = "";
         public string Notebook { get; set; } = "";
+        public string Parent { get; set; } = "";   // containing section-group name ("" if a direct notebook child)
     }
 
     public sealed class GroupInfo
     {
         public string Name { get; set; } = "";
-        public string Guid { get; set; } = "";
+        public string ObjectID { get; set; } = "";
         public string Notebook { get; set; } = "";
+        public string Parent { get; set; } = "";   // containing notebook name
     }
 
     public sealed class Hierarchy
@@ -56,29 +58,46 @@ namespace OneNoteSync
             {
                 var root = XDocument.Parse(xml).Root;
                 if (root == null) return h;
-                foreach (var nb in root.DescendantsAndSelf())
+                foreach (var nb in root.DescendantsAndSelf().Where(e => e.Name.LocalName == "Notebook"))
                 {
-                    if (nb.Name.LocalName != "Notebook") continue;
                     string nbName = (string)nb.Attribute("name") ?? "";
-                    foreach (var sec in nb.Descendants())
+                    string nbId = (string)nb.Attribute("ID") ?? (string)nb.Attribute("objectID") ?? "";
+  
+                    // Sections that are DIRECT children of the notebook (no containing group).
+                    foreach (var sec in nb.Elements().Where(e => e.Name.LocalName == "Section"))
                     {
-                        if (sec.Name.LocalName != "Section") continue;
                         h.Sections.Add(new SectionInfo
                         {
                             Name = (string)sec.Attribute("name") ?? "",
-                            Guid = (string)sec.Attribute("ID") ?? (string)sec.Attribute("objectID") ?? "",
+                            ObjectID = (string)sec.Attribute("ID") ?? (string)sec.Attribute("objectID") ?? "",
                             Notebook = nbName
                         });
                     }
-                    foreach (var grp in nb.Descendants())
+
+                    // Section groups (parent = this notebook).
+                    foreach (var grp in nb.Elements().Where(e => e.Name.LocalName == "SectionGroup"))
                     {
-                        if (grp.Name.LocalName != "SectionGroup") continue;
-                        h.Groups.Add(new GroupInfo
+                        string gName = (string)grp.Attribute("name") ?? "";
+                        var g = new GroupInfo
                         {
-                            Name = (string)grp.Attribute("name") ?? "",
-                            Guid = (string)grp.Attribute("ID") ?? (string)grp.Attribute("objectID") ?? "",
-                            Notebook = nbName
-                        });
+                            Name = gName,
+                            ObjectID = (string)grp.Attribute("ID") ?? (string)grp.Attribute("objectID") ?? "",
+                            Notebook = nbName,
+                            Parent = nbId
+                        };
+                        h.Groups.Add(g);
+
+                        // Sections inside the group (parent = this group).
+                        foreach (var sec in grp.Elements().Where(e => e.Name.LocalName == "Section"))
+                        {
+                            h.Sections.Add(new SectionInfo
+                            {
+                                Name = (string)sec.Attribute("name") ?? "",
+                                ObjectID = (string)sec.Attribute("ID") ?? (string)sec.Attribute("objectID") ?? "",
+                                Notebook = nbName,
+                                Parent = g.ObjectID
+                            });
+                        }
                     }
                 }
             }
@@ -91,39 +110,32 @@ namespace OneNoteSync
         /// <summary>Add a new section to a notebook (best-effort; may fail with 0x80042004).</summary>
         public void CreateSection(string name, string notebook)
         {
-            string guid = "{" + Guid.NewGuid().ToString("N").ToUpperInvariant() + "}";
-            string pgid = "{" + Guid.NewGuid().ToString("N").ToUpperInvariant() + "}";
             string x =
-                "<one:Hierarchy xmlns:one=\"http://schemas.microsoft.com/office/onenote/2013/onenote\">" +
                 "<one:Notebook name=\"" + X(notebook) + "\">" +
-                "<one:Section name=\"" + X(name) + "\" sectionID=\"" + guid + "\">" +
-                "<one:Page name=\"Untitled page\" pageID=\"" + pgid + "\"/></one:Section>" +
-                "</one:Notebook></one:Hierarchy>";
+                "<one:Section name=\"" + X(name) + "\"></one:Section>" +
+                "</one:Notebook>";
             _app.UpdateHierarchy(x);
         }
 
         /// <summary>Add a new section inside a section group (best-effort; often blocked by 0x80042004).</summary>
-        public void CreateSectionInGroup(string name, string groupGuid, string notebook)
+        public void CreateSectionInGroup(string name, GroupInfo group)
         {
-            string guid = "{" + Guid.NewGuid().ToString("N").ToUpperInvariant() + "}";
-            string pgid = "{" + Guid.NewGuid().ToString("N").ToUpperInvariant() + "}";
+            string pgid = "{" + Guid.NewGuid().ToString("N").ToUpperInvariant() + "}{A0}{B0}";
             string x =
-                "<one:Hierarchy xmlns:one=\"http://schemas.microsoft.com/office/onenote/2013/onenote\">" +
-                "<one:Notebook name=\"" + X(notebook) + "\">" +
-                "<one:SectionGroup name=\"" + name + "\" ID=\"" + groupGuid + "\">" +
-                "<one:Section name=\"" + X(name) + "\" ID=\"" + guid + "\">" +
-                "<one:Page name=\"Untitled page\" ID=\"" + pgid + "\"/></one:Section>" +
-                "</one:SectionGroup></one:Notebook></one:Hierarchy>";
+                "<one:Notebook name=\"" + X(group.Notebook) + "\" ID=\"" + X(group.Parent) + "\">" +
+                "<one:SectionGroup name=\"" + X(group.Name) + "\" ID=\"" + X(group.ObjectID) + "\">" +
+                "<one:Section name=\"" + X(name) + "\" ID=\"" + X(pgid) + "\"></one:Section>" +
+                "</one:SectionGroup></one:Notebook>";
             _app.UpdateHierarchy(x);
         }
 
         // ---------------------------------------------------------------- pages
 
         /// <summary>Create a page in a section (makes the section current, then CreateNewPage).</summary>
-        public string CreateNote(string sectionGuid, string pageName)
+        public string CreateNote(string sectionObjectID, string pageName)
         {
             // CreateNewPage(sectionId, out pageId) — creates the page in the given section.
-            string id = _app.CreatePage(sectionGuid);
+            string id = _app.CreatePage(sectionObjectID);
             if (string.IsNullOrEmpty(id))
                 throw new Exception("CreateNewPage returned no page id (LastError: " + (_app.LastError?.Message ?? "n/a") + ")");
             return id;
@@ -185,7 +197,7 @@ namespace OneNoteSync
         void SetPageBody(string pageId, string summary, string pdfPath, string pdfName,
                         List<(string Name, byte[] Png)> rasters, int dpi)
         {
-            try { _app.Navigate(pageId); } catch { }
+            //try { _app.Navigate(pageId); } catch { }
             System.Threading.Thread.Sleep(500);
             string xml = _app.GetPage(pageId, 0); // piBasic
             if (string.IsNullOrEmpty(xml))
@@ -195,7 +207,6 @@ namespace OneNoteSync
             if (idx < 0) throw new Exception("No </one:Page> in page XML");
             string newXml = xml.Insert(idx, body);
             _app.UpdatePage(newXml);
-            Thread.Sleep(5000);
         }
 
         static string X(string s) => (s ?? "").Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;").Replace("\"", "&quot;");

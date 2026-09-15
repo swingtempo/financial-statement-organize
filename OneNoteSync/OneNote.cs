@@ -84,10 +84,10 @@ namespace OneNoteSync
 
         // CreateNewPage(String bstrSectionID, out String pbstrPageID) — creates a page
         // in the given section (the first arg is the SECTION id, not a page name).
-        public string CreatePage(string sectionGuid)
+        public string CreatePage(string sectionObjectID)
         {
             string id = null;
-            _app.CreateNewPage(sectionGuid, out id);
+            _app.CreateNewPage(sectionObjectID, out id);
             return id ?? "";
         }
 
