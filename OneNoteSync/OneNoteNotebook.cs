@@ -10,7 +10,8 @@ namespace OneNoteSync
         public string Name { get; set; } = "";
         public string ObjectID { get; set; } = "";
         public string Notebook { get; set; } = "";
-        public string Parent { get; set; } = "";   // containing section-group name ("" if a direct notebook child)
+        public string Parent { get; set; } = "";   // containing section-group ObjectID ("" if a direct notebook child)
+        public string ParentName { get; set; } = ""; // containing section-group NAME ("" if a direct notebook child)
     }
 
     public sealed class GroupInfo
@@ -67,6 +68,9 @@ namespace OneNoteSync
                 if (root == null) return h;
                 foreach (var nb in root.DescendantsAndSelf().Where(e => e.Name.LocalName == "Notebook"))
                 {
+                    // Skip recycle-bin / deleted items (isInRecycleBin on notebooks, groups, sections;
+                    // isRecycleBin on section groups; isDeletedPages on sections).
+                    if (IsHidden(nb)) continue;
                     string nbName = (string)nb.Attribute("name") ?? "";
                     string nbId = (string)nb.Attribute("ID") ?? (string)nb.Attribute("objectID") ?? "";
                     h.Notebooks.Add(new NotebookInfo { Name = nbName, ObjectID = nbId });
@@ -74,6 +78,7 @@ namespace OneNoteSync
                     // Sections that are DIRECT children of the notebook (no containing group).
                     foreach (var sec in nb.Elements().Where(e => e.Name.LocalName == "Section"))
                     {
+                        if (IsHidden(sec)) continue;
                         h.Sections.Add(new SectionInfo
                         {
                             Name = (string)sec.Attribute("name") ?? "",
@@ -85,6 +90,7 @@ namespace OneNoteSync
                     // Section groups (parent = this notebook).
                     foreach (var grp in nb.Elements().Where(e => e.Name.LocalName == "SectionGroup"))
                     {
+                        if (IsHidden(grp)) continue;
                         string gName = (string)grp.Attribute("name") ?? "";
                         var g = new GroupInfo
                         {
@@ -98,12 +104,14 @@ namespace OneNoteSync
                         // Sections inside the group (parent = this group).
                         foreach (var sec in grp.Elements().Where(e => e.Name.LocalName == "Section"))
                         {
+                            if (IsHidden(sec)) continue;
                             h.Sections.Add(new SectionInfo
                             {
                                 Name = (string)sec.Attribute("name") ?? "",
                                 ObjectID = (string)sec.Attribute("ID") ?? (string)sec.Attribute("objectID") ?? "",
                                 Notebook = nbName,
-                                Parent = g.ObjectID
+                                Parent = g.ObjectID,
+                                ParentName = gName
                             });
                         }
                     }
@@ -111,6 +119,21 @@ namespace OneNoteSync
             }
             catch { /* best-effort; return what we have */ }
             return h;
+        }
+
+        /// <summary>
+        /// True when a hierarchy item should be hidden from the user: it is in the
+        /// recycle bin (isInRecycleBin), a section group that is the recycle bin
+        /// (isRecycleBin), or a section whose pages are deleted (isDeletedPages).
+        /// </summary>
+        static bool IsHidden(XElement e)
+        {
+            return BoolAttr(e, "isInRecycleBin") || BoolAttr(e, "isRecycleBin") || BoolAttr(e, "isDeletedPages");
+        }
+
+        static bool BoolAttr(XElement e, string name)
+        {
+            return string.Equals((string)e.Attribute(name), "true", StringComparison.OrdinalIgnoreCase);
         }
 
         // ---------------------------------------------------------------- sections
@@ -138,6 +161,22 @@ namespace OneNoteSync
         }
 
         // ---------------------------------------------------------------- pages
+
+        /// <summary>List the page names in a section (for duplicate-title checks).</summary>
+        public List<string> GetPageNames(string sectionObjectID)
+        {
+            string xml = _app.GetHierarchy(sectionObjectID, 4); // HierarchyScope.hsPages
+            var names = new List<string>();
+            try
+            {
+                var root = XDocument.Parse(xml).Root;
+                if (root != null)
+                    foreach (var p in root.DescendantsAndSelf().Where(e => e.Name.LocalName == "Page"))
+                        names.Add((string)p.Attribute("name") ?? "");
+            }
+            catch { /* best-effort */ }
+            return names;
+        }
 
         /// <summary>Create a page in a section (makes the section current, then CreateNewPage).</summary>
         public string CreateNote(string sectionObjectID, string pageName)

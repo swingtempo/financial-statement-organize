@@ -82,6 +82,14 @@ namespace OneNoteSync
             return xml ?? "";
         }
 
+        /// <summary>Get a scoped hierarchy (e.g. a section's pages) as raw XML.</summary>
+        public string GetHierarchy(string startLocation, int scope)
+        {
+            string xml = null;
+            _app.GetHierarchy(startLocation, (HierarchyScope)scope, out xml);
+            return xml ?? "";
+        }
+
         // CreateNewPage(String bstrSectionID, out String pbstrPageID) — creates a page
         // in the given section (the first arg is the SECTION id, not a page name).
         public string CreatePage(string sectionObjectID)
