@@ -204,9 +204,25 @@ namespace OneNoteSync
             if (string.IsNullOrEmpty(xml))
                 throw new Exception("GetPageContent returned empty for page " + pageId);
             string body = PageXml.BuildBody(title, rows, pdfPath, pdfName, rasters, dpi);
-            int idx = xml.LastIndexOf("</one:Page>");
-            if (idx < 0) throw new Exception("No </one:Page> in page XML");
-            string newXml = xml.Insert(idx, body);
+
+            // <one:Title> must precede all body elements (Outline/Image/InsertedFile) and appear
+            // at most once, so we rebuild the page rather than append: keep the XML declaration +
+            // the opening <one:Page ...> tag (which preserves the page ID), then replace all
+            // interior content with Title + Outline.
+            string newXml;
+            int pageStart = xml.IndexOf("<one:Page");
+            if (pageStart >= 0)
+            {
+                int pageTagEnd = xml.IndexOf('>', pageStart) + 1;
+                string header = xml.Substring(0, pageTagEnd);
+                newXml = header + body + "</one:Page>";
+            }
+            else
+            {
+                int idx = xml.LastIndexOf("</one:Page>");
+                if (idx < 0) throw new Exception("No </one:Page> in page XML");
+                newXml = xml.Insert(idx, body);
+            }
             _app.UpdatePage(newXml);
         }
 

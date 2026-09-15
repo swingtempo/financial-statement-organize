@@ -6,7 +6,7 @@ namespace OneNoteSync
 {
     /// <summary>
     /// Builds the OneNote page-body XML for a statement page:
-    ///   - the title line (becomes the OneNote page title)
+    ///   - the page title in a &lt;one:Title&gt; element (precedes the body, per the OneNote schema)
     ///   - a summary table, one row per account: Date | Account | Balance | Notes
     ///   - the PDF attached as &lt;one:InsertedFile pathSource=...&gt; (OneNote ingests it)
     ///   - each rendered page image as &lt;one:Image&gt; with inline base64 &lt;one:Data&gt;
@@ -36,13 +36,15 @@ namespace OneNoteSync
         {
             string now = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.000Z");
             var sb = new StringBuilder();
+
+            // 1. The page title lives in <one:Title>, which the OneNote schema requires to
+            //    precede all body elements (Outline/Image/InsertedFile/...).
+            sb.Append(BuildTitle(now, title));
+
+            // 2. The body: a single Outline holding the table, spacer, PDF, and images.
             sb.Append("<one:Outline><one:OEChildren>");
 
-            // 1. Title line (becomes the OneNote page title).
-            if (!string.IsNullOrWhiteSpace(title))
-                sb.Append(OE(now, title));
-
-            // 2. Summary table (one row per account).
+            // Summary table (one row per account).
             if (rows != null && rows.Count > 0)
                 sb.Append(BuildTable(now, rows));
 
@@ -129,6 +131,20 @@ namespace OneNoteSync
             sb.Append("</one:Table>");
             sb.Append("</one:OE>");
             return sb.ToString();
+        }
+
+        /// <summary>
+        /// Builds the &lt;one:Title&gt; element (the page title). Per the OneNote schema it must
+        /// appear before any body element and appears at most once.
+        /// </summary>
+        static string BuildTitle(string now, string title)
+        {
+            var t = title ?? "";
+            return "<one:Title lang=\"en-US\">"
+                 + "<one:OE creationTime=\"" + now + "\" lastModifiedTime=\"" + now + "\" alignment=\"left\">"
+                 + "<one:T>" + Esc(t) + "</one:T>"
+                 + "</one:OE>"
+                 + "</one:Title>";
         }
 
         static string Cell(string now, string text)
