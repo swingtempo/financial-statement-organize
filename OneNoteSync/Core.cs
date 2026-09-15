@@ -28,6 +28,8 @@ public sealed class FileSetting
 {
     public bool Enabled { get; set; } = true;
     public string Title { get; set; } = "";
+    /// <summary>Whether to prepend the statement's "yyyy-MM" to the page title.</summary>
+    public bool Date { get; set; } = false;
 }
 
 /// <summary>
@@ -168,14 +170,24 @@ public static class Core
     /// The page title: "yyyy-MM &lt;title&gt;" (the year-month is prepended, per request).
     /// Uses the latest statement date in the file; falls back to the current month.
     /// </summary>
-    public static string PageTitle(StatementFile f, string title)
+    public static string PageTitle(StatementFile f, string title, bool prependDate)
     {
+        string t = Sanitize(title);
+        if (t.Length == 0) t = Sanitize(DefaultTitle(f));
+        if (!prependDate)
+            return t.Length > 60 ? t.Substring(0, 60).Trim() : t;
         var dates = f.Statements.Where(s => s.StatementDate.HasValue).Select(s => s.StatementDate!.Value).ToList();
         string ym = dates.Count > 0 ? dates.Max().ToString("yyyy-MM") : DateTime.Now.ToString("yyyy-MM");
-        string t = Sanitize(title);
-        if (t.Length == 0) t = Sanitize(f.Institution.Length > 0 ? f.Institution : "Statement");
         string name = $"{ym} {t}";
         return name.Length > 60 ? name.Substring(0, 60).Trim() : name;
+    }
+
+    /// <summary>Default page title = the file name (without extension).</summary>
+    public static string DefaultTitle(StatementFile f)
+    {
+        if (!string.IsNullOrWhiteSpace(f.FileName)) return Path.GetFileNameWithoutExtension(f.FileName);
+        if (!string.IsNullOrWhiteSpace(f.Institution)) return f.Institution;
+        return "Statement";
     }
 
     public static string Sanitize(string s)

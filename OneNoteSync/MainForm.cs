@@ -49,8 +49,11 @@ public sealed class MainForm : Form
     private DataGridViewTextBoxColumn _colInst = null!;
     private DataGridViewTextBoxColumn _colFile = null!;
     private DataGridViewButtonColumn _colOpen = null!;
+    private DataGridViewCheckBoxColumn _colDate = null!;
     private DataGridViewTextBoxColumn _colTitle = null!;
+    private DataGridViewButtonColumn _colReset = null!;
     private DataGridViewTextBoxColumn _colStatus = null!;
+    private int _editingTitleRow = -1;
 
     private RichTextBox _log = null!;
     private readonly List<string> _pendingLog = new();
@@ -205,10 +208,16 @@ public sealed class MainForm : Form
         _colInst = new DataGridViewTextBoxColumn { HeaderText = "Institution", ReadOnly = true, FillWeight = 18 };
         _colFile = new DataGridViewTextBoxColumn { HeaderText = "File", ReadOnly = true, FillWeight = 24 };
         _colOpen = new DataGridViewButtonColumn { HeaderText = "Open", FillWeight = 7 };
-        _colTitle = new DataGridViewTextBoxColumn { HeaderText = "Title (page becomes 'yyyy-MM <title>')", FillWeight = 26 };
+        _colDate = new DataGridViewCheckBoxColumn { HeaderText = "Date", FillWeight = 6 };
+        _colTitle = new DataGridViewTextBoxColumn { HeaderText = "Title", FillWeight = 26 };
+        _colReset = new DataGridViewButtonColumn { HeaderText = "Reset", FillWeight = 8 };
         _colStatus = new DataGridViewTextBoxColumn { HeaderText = "Status", ReadOnly = true, FillWeight = 12 };
-        _fileGrid.Columns.AddRange(_colEnabled, _colInst, _colFile, _colOpen, _colTitle, _colStatus);
+        _fileGrid.Columns.AddRange(_colEnabled, _colInst, _colFile, _colOpen, _colDate, _colTitle, _colReset, _colStatus);
         _fileGrid.CellClick += FileGrid_CellClick;
+        _fileGrid.CellPainting += FileGrid_CellPaint;
+        _fileGrid.CellBeginEdit += FileGrid_CellBeginEdit;
+        _fileGrid.CellEndEdit += FileGrid_CellEndEdit;
+        _fileGrid.CellValueChanged += FileGrid_CellValueChanged;
         _fileGrid.DataError += (_, e) => { e.ThrowException = false; LogGrid("fileGrid DataError: " + (e.Exception?.Message ?? "?")); };
 
         // Log (bottom).
@@ -345,13 +354,15 @@ public sealed class MainForm : Form
         {
             string inst = InstOf(f);
             bool enabled = true;
-            string title = inst;
+            bool date = false;
+            string title = Core.DefaultTitle(f);
             if (_map.Files.TryGetValue(f.FileName, out var fs))
             {
                 enabled = fs.Enabled;
-                title = string.IsNullOrWhiteSpace(fs.Title) ? inst : fs.Title;
+                date = fs.Date;
+                title = string.IsNullOrWhiteSpace(fs.Title) ? Core.DefaultTitle(f) : fs.Title;
             }
-            int r = _fileGrid.Rows.Add(enabled, inst, f.FileName, "Open", title, "");
+            int r = _fileGrid.Rows.Add(enabled, inst, f.FileName, "Open", date, title, "Reset", "");
         }
         _updating = false;
     }
@@ -529,7 +540,13 @@ public sealed class MainForm : Form
     /// <summary>The "Open" button in the file grid: shell-executes (opens) the PDF.</summary>
     private void FileGrid_CellClick(object? sender, DataGridViewCellEventArgs e)
     {
-        if (e.RowIndex < 0 || e.ColumnIndex != _colOpen.Index) return;
+        if (e.RowIndex < 0) return;
+        if (e.ColumnIndex == _colReset.Index)
+        {
+            ResetFileRow(e.RowIndex);
+            return;
+        }
+        if (e.ColumnIndex != _colOpen.Index) return;
         string file = _fileGrid.Rows[e.RowIndex].Cells[_colFile.Index].Value?.ToString() ?? "";
         if (file.Length == 0) return;
         var f = _files.FirstOrDefault(x => string.Equals(x.FileName, file, StringComparison.OrdinalIgnoreCase));
@@ -549,6 +566,67 @@ public sealed class MainForm : Form
         {
             Log("  Open failed: " + ex.Message, error: true);
         }
+    }
+
+    /// <summary>Reset a file row: Title back to the default (file name) and Date off.</summary>
+    private void ResetFileRow(int rowIndex)
+    {
+        var row = _fileGrid.Rows[rowIndex];
+        string file = row.Cells[_colFile.Index].Value?.ToString() ?? "";
+        var f = _files.FirstOrDefault(x => string.Equals(x.FileName, file, StringComparison.OrdinalIgnoreCase));
+        string defaultTitle = f != null ? Core.DefaultTitle(f) : "";
+        _updating = true;
+        row.Cells[_colTitle.Index].Value = defaultTitle;
+        row.Cells[_colDate.Index].Value = false;
+        _updating = false;
+        Log("  Reset " + file + " -> " + defaultTitle);
+    }
+
+    /// <summary>
+    /// Display the full page title (base name + optional "yyyy-MM" prefix) in the Title column.
+    /// The cell's value stays the base title, so the run pipeline can derive the final name
+    /// without double-prefixing the date.
+    /// </summary>
+    private void FileGrid_CellPaint(object? sender, DataGridViewCellPaintingEventArgs e)
+    {
+        if (e.RowIndex < 0 || e.ColumnIndex != _colTitle.Index) return;
+        if (e.RowIndex == _editingTitleRow) return; // let the edit control show the base title
+        var row = _fileGrid.Rows[e.RowIndex];
+        string file = row.Cells[_colFile.Index].Value?.ToString() ?? "";
+        var f = _files.FirstOrDefault(x => string.Equals(x.FileName, file, StringComparison.OrdinalIgnoreCase));
+        string baseTitle = row.Cells[_colTitle.Index].Value?.ToString() ?? "";
+        bool date = (bool)(row.Cells[_colDate.Index].Value ?? false);
+        string full = f != null ? Core.PageTitle(f, baseTitle, date) : baseTitle;
+        var cell = row.Cells[e.ColumnIndex];
+        bool isSelected = row.Selected || _fileGrid.SelectedCells.Contains(cell) || _fileGrid.CurrentCell == cell;
+        e.PaintBackground(e.CellBounds, isSelected);
+        var font = row.DefaultCellStyle.Font ?? _fileGrid.Font;
+        using (var br = new SolidBrush(row.DefaultCellStyle.ForeColor))
+        {
+            var sz = e.Graphics.MeasureString(full, font);
+            e.Graphics.DrawString(full, font, br,
+                e.CellBounds.Left + 4,
+                e.CellBounds.Top + Math.Max(0f, (e.CellBounds.Height - sz.Height) / 2f));
+        }
+        e.Handled = true;
+    }
+
+    private void FileGrid_CellBeginEdit(object? sender, DataGridViewCellCancelEventArgs e)
+    {
+        if (e.ColumnIndex == _colTitle.Index) _editingTitleRow = e.RowIndex;
+    }
+
+    private void FileGrid_CellEndEdit(object? sender, DataGridViewCellEventArgs e)
+    {
+        if (e.ColumnIndex == _colTitle.Index) _editingTitleRow = -1;
+    }
+
+    /// <summary>Repaint the Title preview when its inputs (base title or the Date flag) change.</summary>
+    private void FileGrid_CellValueChanged(object? sender, DataGridViewCellEventArgs e)
+    {
+        if (e.RowIndex < 0) return;
+        if (e.ColumnIndex == _colDate.Index || e.ColumnIndex == _colTitle.Index)
+            _fileGrid.InvalidateCell(_colTitle.Index, e.RowIndex);
     }
 
     /// <summary>Run an action on the UI thread (fire-and-forget, guarded).</summary>
@@ -572,6 +650,7 @@ public sealed class MainForm : Form
         public TargetOption? Target;
         public string Notebook = "";
         public string Title = "";
+        public bool Date = false;
     }
 
     /// <summary>
@@ -610,6 +689,7 @@ public sealed class MainForm : Form
                         Target = tgt,
                         Notebook = nb,
                         Title = row.Cells[_colTitle.Index].Value?.ToString() ?? "",
+                        Date = (bool)(row.Cells[_colDate.Index].Value ?? false),
                     });
                 }
             };
@@ -736,6 +816,8 @@ public sealed class MainForm : Form
         int made = 0, skipped = 0, noTarget = 0, disabled = 0, dup = 0;
         int dpi = Core.GetDpi(_env);
         int maxPages = Core.GetMaxPages(_env);
+        var problems = new List<string>();
+        var results = new List<(string File, string Status, bool Uncheck)>();
         Log($"Importing {rows.Count} file(s) {(dryRun ? "(dry run)" : "into OneNote")} — one page per file");
 
         foreach (var rr in rows)
@@ -752,6 +834,7 @@ public sealed class MainForm : Form
             {
                 Log($"  {f.FileName}: skipped (disabled).");
                 disabled++;
+                results.Add((f.FileName, "disabled", false));
                 continue;
             }
             if (rr.Target == null)
@@ -759,6 +842,8 @@ public sealed class MainForm : Form
                 Log($"  {f.FileName}: NO TARGET SET — skipping.", error: true);
                 noTarget++;
                 skipped++;
+                problems.Add($"{f.FileName} — no target set (pick a Notebook + Target in the top grid).");
+                results.Add((f.FileName, "no target", false));
                 continue;
             }
 
@@ -767,14 +852,21 @@ public sealed class MainForm : Form
             {
                 Log($"  ! {f.FileName}: PDF not found at {pdf} — skipping.", error: true);
                 skipped++;
+                problems.Add($"{f.FileName} — PDF not found at {pdf}.");
+                results.Add((f.FileName, "no PDF", false));
                 continue;
             }
 
             int year = f.Statements.Select(s => s.StatementDate?.Year ?? 0).Max();
-            string pageName = Core.PageTitle(f, rr.Title);
+            string pageName = Core.PageTitle(f, rr.Title, rr.Date);
             Log($"  {f.FileName} -> [{rr.Notebook}] {rr.Target} / {pageName}");
 
-            if (dryRun) { made++; continue; }
+            if (dryRun)
+            {
+                made++;
+                results.Add((f.FileName, "would create", false));
+                continue;
+            }
 
             try
             {
@@ -790,6 +882,8 @@ public sealed class MainForm : Form
                 {
                     Log($"    page '{pageName}' already exists in [{sec.Notebook}] {sec.Name} — skipping (no duplicate).");
                     dup++;
+                    problems.Add($"{f.FileName} — page '{pageName}' already exists in [{sec.Notebook}] {sec.Name} (duplicate).");
+                    results.Add((f.FileName, "duplicate", false));
                     continue;
                 }
 
@@ -797,18 +891,47 @@ public sealed class MainForm : Form
                 var rasters = PdfTools.Rasterize(pdf, dpi, maxPages);
                 onenote!.CommitPageFull(pageId, pageName, accRows, pdf, rasters, dpi);
                 made++;
+                results.Add((f.FileName, "done", true));   // success -> uncheck
                 Log($"    created + content set ({rasters.Count} image(s), {f.Statements.Count} account(s)).");
             }
             catch (Exception e)
             {
                 skipped++;
+                problems.Add($"{f.FileName} — failed: {e.Message}");
+                results.Add((f.FileName, "failed", false));
                 Log($"    ! {f.FileName} failed: {e.Message}", error: true);
             }
         }
 
         using (onenote) { }
         OnUi(() => _btnStop.Enabled = false);
+        OnUi(() => ApplyResults(results));
         Log($"Done: {made} page(s), {skipped} skipped, {noTarget} without target, {disabled} disabled, {dup} duplicate(s).");
+        if (problems.Count > 0)
+        {
+            Log("");
+            Log($"=== NEEDS ATTENTION — {problems.Count} item(s) not created ===", error: true);
+            foreach (var p in problems) Log("  - " + p, error: true);
+            Log("Those files stayed checked. Fix the issue and run again.", error: true);
+        }
+    }
+
+    /// <summary>
+    /// Apply per-file run results to the bottom grid: set the Status column and
+    /// uncheck files that were processed successfully (skipped/failed files stay
+    /// checked so they are retried on the next run). Must be called on the UI thread.
+    /// </summary>
+    private void ApplyResults(List<(string File, string Status, bool Uncheck)> results)
+    {
+        var dict = new Dictionary<string, (string Status, bool Uncheck)>(StringComparer.OrdinalIgnoreCase);
+        foreach (var r in results) dict[r.File] = (r.Status, r.Uncheck);
+        foreach (DataGridViewRow row in _fileGrid.Rows)
+        {
+            string file = row.Cells[_colFile.Index].Value?.ToString() ?? "";
+            if (!dict.TryGetValue(file, out var su)) continue;
+            row.Cells[_colStatus.Index].Value = su.Status;
+            if (su.Uncheck) row.Cells[_colEnabled.Index].Value = false;
+        }
     }
 
     private void DoTest()
@@ -994,6 +1117,7 @@ public sealed class MainForm : Form
             {
                 Enabled = (bool)(row.Cells[_colEnabled.Index].Value ?? true),
                 Title = row.Cells[_colTitle.Index].Value?.ToString() ?? "",
+                Date = (bool)(row.Cells[_colDate.Index].Value ?? false),
             };
         }
 
