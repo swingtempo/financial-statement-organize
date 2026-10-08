@@ -524,7 +524,7 @@ public sealed class MainForm : Form
         if (_hierarchy == null) return list;
         foreach (var g in _hierarchy.Groups)
             if (!g.Name.StartsWith("OneNote_RecycleBin", StringComparison.OrdinalIgnoreCase))
-                list.Add(new TargetOption(g.Name, "group", g.Notebook, g.Parent, g.Notebook));
+                list.Add(new TargetOption(g.Name, "group", g.Notebook, g.Parent, g.ParentName));
         foreach (var s in _hierarchy.Sections)
             if (!s.Name.StartsWith("OneNote_RecycleBin", StringComparison.OrdinalIgnoreCase))
                 list.Add(new TargetOption(s.Name, "section", s.Notebook, s.Parent, s.ParentName));
@@ -1008,6 +1008,21 @@ public sealed class MainForm : Form
         var results = new List<(string File, string Status, bool Uncheck)>();
         Log($"Importing {rows.Count} file(s) {(dryRun ? "(dry run)" : "into OneNote")} — one page per file");
 
+        // Pre-run check: list the required sections that are (still) missing so the user can
+        // create them ahead of time (the run will also try to create them, best-effort).
+        if (h != null)
+        {
+            var missing = FindMissingSections(rows, h);
+            if (missing.Count > 0)
+            {
+                Log("");
+                Log($"=== {missing.Count} required section(s) not found in OneNote ===", error: true);
+                foreach (var m in missing) Log("  - " + m, error: true);
+                Log("Create these in OneNote and re-run (or let the run attempt creation).", error: true);
+                Log("");
+            }
+        }
+
         foreach (var rr in rows)
         {
             if (_cts is { IsCancellationRequested: true })
@@ -1176,6 +1191,56 @@ public sealed class MainForm : Form
     }
 
     /// <summary>
+    /// Report the sections the enabled files need but that are not (yet) present in OneNote:
+    /// a group target needs a section "{group} {year}"; a section target needs its named
+    /// section. This lets the user create the missing sections ahead of time (auto-creation
+    /// is best-effort). Returns one human-readable line per missing item (empty when all exist).
+    /// </summary>
+    private List<string> FindMissingSections(List<RunRow> rows, Hierarchy h)
+    {
+        var missing = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var rr in rows)
+        {
+            if (!rr.Enabled || rr.Target == null) continue;
+            var f = _files.FirstOrDefault(x => string.Equals(x.FileName, rr.FileName, StringComparison.OrdinalIgnoreCase));
+            if (f == null || f.Error || f.Statements.Count == 0) continue;
+            int year = f.Statements.Select(s => s.StatementDate?.Year ?? 0).Max();
+            string nb = rr.Notebook;
+
+            if (rr.Target.Kind == "group")
+            {
+                // Required: a section "{group} {year}" inside the group.
+                var g = h.Groups.FirstOrDefault(x => x.Name.Equals(rr.Target.Name, StringComparison.OrdinalIgnoreCase)
+                        && (string.IsNullOrEmpty(nb) || x.Notebook.Equals(nb, StringComparison.OrdinalIgnoreCase)));
+                if (g == null)
+                {
+                    if (seen.Add($"group:{rr.Target.Name}")) missing.Add($"group \"{rr.Target.Name}\" (in notebook {nb}) — not found");
+                    continue;
+                }
+                string name = $"{g.Name} {year}";
+                var sec = h.Sections.FirstOrDefault(s => s.Name.Equals(name, StringComparison.OrdinalIgnoreCase) && SameParent(s.Parent, g.ObjectID));
+                if (sec == null && seen.Add($"sec:{name}"))
+                    missing.Add($"section \"{name}\" (in group {g.Name}) — not found");
+            }
+            else // section target: the required section is the target name (disambiguated by parent group).
+            {
+                string name = rr.Target.Name;
+                string parentID = "";
+                if (!string.IsNullOrEmpty(rr.Target.ParentName))
+                    parentID = h.Groups.FirstOrDefault(x => x.Name.Equals(rr.Target.ParentName, StringComparison.OrdinalIgnoreCase)
+                            && (string.IsNullOrEmpty(nb) || x.Notebook.Equals(nb, StringComparison.OrdinalIgnoreCase)))?.ObjectID ?? "";
+                var sec = h.Sections.FirstOrDefault(s => s.Name.Equals(name, StringComparison.OrdinalIgnoreCase)
+                        && SameParent(s.Parent, parentID)
+                        && (string.IsNullOrEmpty(nb) || s.Notebook.Equals(nb, StringComparison.OrdinalIgnoreCase)));
+                if (sec == null && seen.Add($"sec:{name}"))
+                    missing.Add($"section \"{name}\" (in {nb}) — not found");
+            }
+        }
+        return missing;
+    }
+
+    /// <summary>
     /// Resolve the target section, creating it if needed.
     ///  - "group"  -> use the group as the parent; the statement's section is "\{Group\} {year}"
     ///                (e.g. "Fidelity 2026"). Every institution mapped to the group in that year
@@ -1191,13 +1256,11 @@ public sealed class MainForm : Form
         // Prefer an existing section (the user pre-creates them); create as a fallback.
         if (entry.Kind == "group")
         {
-            string notebookId = NotebookId(h, notebook);
             // A same-named group in ANOTHER notebook must not be picked when a notebook is
-            // requested (the old cross-notebook fallback is allowed only when no notebook was set).
-            var g = h.Groups.FirstOrDefault(x => x.Name.Equals(entry.Name, StringComparison.OrdinalIgnoreCase) && SameParent(x.Parent, notebookId))
-                  ?? (string.IsNullOrEmpty(notebook)
-                      ? h.Groups.FirstOrDefault(x => x.Name.Equals(entry.Name, StringComparison.OrdinalIgnoreCase))
-                      : null)
+            // requested (cross-notebook fallback only when no notebook was set). Matches at any
+            // nesting depth because every group carries its top-level notebook name.
+            var g = h.Groups.FirstOrDefault(x => x.Name.Equals(entry.Name, StringComparison.OrdinalIgnoreCase)
+                    && (string.IsNullOrEmpty(notebook) || x.Notebook.Equals(notebook, StringComparison.OrdinalIgnoreCase)))
                   ?? throw new Exception($"Section group \"{entry.Name}\" not found in notebook \"{notebook}\".");
             string name = $"{g.Name} {year}";
             var existing = h.Sections.FirstOrDefault(s => s.Name.Equals(name, StringComparison.OrdinalIgnoreCase) && SameParent(s.Parent, g.ObjectID));
@@ -1258,12 +1321,6 @@ public sealed class MainForm : Form
     }
 
     private static bool SameParent(string a, string b) => string.Equals(a ?? "", b ?? "", StringComparison.OrdinalIgnoreCase);
-
-    private static string NotebookId(Hierarchy h, string notebookName)
-    {
-        var nb = h.Notebooks.FirstOrDefault(n => n.Name.Equals(notebookName, StringComparison.OrdinalIgnoreCase));
-        return nb?.ObjectID ?? "";
-    }
 
     private static string secNotebookFallback(Hierarchy h)
     {

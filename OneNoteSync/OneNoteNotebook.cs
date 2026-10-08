@@ -18,8 +18,10 @@ namespace OneNoteSync
     {
         public string Name { get; set; } = "";
         public string ObjectID { get; set; } = "";
-        public string Notebook { get; set; } = "";
-        public string Parent { get; set; } = "";   // containing notebook name
+        public string Notebook { get; set; } = "";       // notebook name
+        public string NotebookID { get; set; } = "";    // notebook ObjectID (top-level)
+        public string Parent { get; set; } = "";         // containing section-group ObjectID ("" if a direct notebook child)
+        public string ParentName { get; set; } = "";     // containing section-group name ("" if a direct notebook child)
     }
 
     public sealed class NotebookInfo
@@ -75,50 +77,51 @@ namespace OneNoteSync
                     string nbId = (string)nb.Attribute("ID") ?? (string)nb.Attribute("objectID") ?? "";
                     h.Notebooks.Add(new NotebookInfo { Name = nbName, ObjectID = nbId });
 
-                    // Sections that are DIRECT children of the notebook (no containing group).
-                    foreach (var sec in nb.Elements().Where(e => e.Name.LocalName == "Section"))
-                    {
-                        if (IsHidden(sec)) continue;
-                        h.Sections.Add(new SectionInfo
-                        {
-                            Name = (string)sec.Attribute("name") ?? "",
-                            ObjectID = (string)sec.Attribute("ID") ?? (string)sec.Attribute("objectID") ?? "",
-                            Notebook = nbName
-                        });
-                    }
-
-                    // Section groups (parent = this notebook).
-                    foreach (var grp in nb.Elements().Where(e => e.Name.LocalName == "SectionGroup"))
-                    {
-                        if (IsHidden(grp)) continue;
-                        string gName = (string)grp.Attribute("name") ?? "";
-                        var g = new GroupInfo
-                        {
-                            Name = gName,
-                            ObjectID = (string)grp.Attribute("ID") ?? (string)grp.Attribute("objectID") ?? "",
-                            Notebook = nbName,
-                            Parent = nbId
-                        };
-                        h.Groups.Add(g);
-
-                        // Sections inside the group (parent = this group).
-                        foreach (var sec in grp.Elements().Where(e => e.Name.LocalName == "Section"))
-                        {
-                            if (IsHidden(sec)) continue;
-                            h.Sections.Add(new SectionInfo
-                            {
-                                Name = (string)sec.Attribute("name") ?? "",
-                                ObjectID = (string)sec.Attribute("ID") ?? (string)sec.Attribute("objectID") ?? "",
-                                Notebook = nbName,
-                                Parent = g.ObjectID,
-                                ParentName = gName
-                            });
-                        }
-                    }
+                    // Recurse through sections AND section groups at any nesting depth, so a
+                    // section group nested inside another section group is also captured.
+                    AddContents(nb, nbName, nbId, null, h.Sections, h.Groups);
                 }
             }
             catch { /* best-effort; return what we have */ }
             return h;
+        }
+
+        // Recurse into a container's (notebook or section-group) children, collecting sections
+        // and section groups at any nesting depth. `parent` is the containing group (null when
+        // the container is the notebook itself).
+        static void AddContents(XElement container, string nbName, string nbId, GroupInfo? parent,
+                                List<SectionInfo> sections, List<GroupInfo> groups)
+        {
+            foreach (var el in container.Elements())
+            {
+                if (el.Name.LocalName == "Section")
+                {
+                    if (IsHidden(el)) continue;
+                    sections.Add(new SectionInfo
+                    {
+                        Name = (string)el.Attribute("name") ?? "",
+                        ObjectID = (string)el.Attribute("ID") ?? (string)el.Attribute("objectID") ?? "",
+                        Notebook = nbName,
+                        Parent = parent?.ObjectID ?? "",
+                        ParentName = parent?.Name ?? ""
+                    });
+                }
+                else if (el.Name.LocalName == "SectionGroup")
+                {
+                    if (IsHidden(el)) continue;
+                    var g = new GroupInfo
+                    {
+                        Name = (string)el.Attribute("name") ?? "",
+                        ObjectID = (string)el.Attribute("ID") ?? (string)el.Attribute("objectID") ?? "",
+                        Notebook = nbName,
+                        NotebookID = nbId,
+                        Parent = parent?.ObjectID ?? "",
+                        ParentName = parent?.Name ?? ""
+                    };
+                    groups.Add(g);
+                    AddContents(el, nbName, nbId, g, sections, groups);   // recurse into nested groups
+                }
+            }
         }
 
         /// <summary>
@@ -153,7 +156,7 @@ namespace OneNoteSync
         {
             string pgid = "{" + Guid.NewGuid().ToString("N").ToUpperInvariant() + "}{A0}{B0}";
             string x =
-                "<one:Notebook name=\"" + X(group.Notebook) + "\" ID=\"" + X(group.Parent) + "\">" +
+                "<one:Notebook name=\"" + X(group.Notebook) + "\" ID=\"" + X(group.NotebookID) + "\">" +
                 "<one:SectionGroup name=\"" + X(group.Name) + "\" ID=\"" + X(group.ObjectID) + "\">" +
                 "<one:Section name=\"" + X(name) + "\" ID=\"" + X(pgid) + "\"></one:Section>" +
                 "</one:SectionGroup></one:Notebook>";
