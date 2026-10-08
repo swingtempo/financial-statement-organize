@@ -6,7 +6,10 @@ namespace OneNoteSync;
 
 /// <summary>
 /// Windows Forms front-end for OneNoteSync. Two grids:
-///   - TOP:    institution -&gt; OneNote location mapping (Notebook / Target).
+///   - TOP:    institution -&gt; OneNote location mapping (Notebook / Target), plus a
+///             "Set all notebooks" button that fills the Notebook column of every row at
+///             once (targets stay per-institution) and saves that notebook as the default
+///             for institutions — including future documents — that have no notebook set.
 ///   - BOTTOM: per-file settings (On / Title).
 /// Plus a live debug log of everything the sync does.
 /// </summary>
@@ -36,10 +39,14 @@ public sealed class MainForm : Form
     private Button _btnSave = null!;
     private Button _btnClear = null!;
     private Label _info = null!;
+    private Panel _infoBar = null!;
+    private ComboBox _cboDefaultNb = null!;
+    private Button _btnSetAllNb = null!;
 
     // TOP grid: institution -> notebook/target.
     private DataGridView _mapGrid = null!;
     private DataGridViewTextBoxColumn _mapColInst = null!;
+    private DataGridViewTextBoxColumn _mapColKind = null!;
     private DataGridViewComboBoxColumn _mapColNotebook = null!;
     private DataGridViewComboBoxColumn _mapColTarget = null!;
 
@@ -76,16 +83,19 @@ public sealed class MainForm : Form
         }
         public override string ToString()
         {
+            // The kind is APPENDED to the name (and also shown in its own column): the leading
+            // characters still drive keyboard navigation of the dropdown.
+            string kind = Kind == "group" ? " [GROUP]" : " [SECTION]";
             if (Kind == "group")
             {
                 string nb = string.IsNullOrEmpty(Notebook) ? "" : $"  ({Notebook})";
-                return $"[GROUP] {Name}{nb}";
+                return $"{Name}{kind}{nb}";
             }
             // Section: show the containing section-group name when present, else the notebook.
             if (!string.IsNullOrEmpty(ParentName))
-                return $"[SECTION] {Name}  (in {ParentName})";
+                return $"{Name}{kind}  (in {ParentName})";
             string nbs = string.IsNullOrEmpty(Notebook) ? "" : $"  ({Notebook})";
-            return $"[SECTION] {Name}{nbs}";
+            return $"{Name}{kind}{nbs}";
         }
         // Value equality (Name + Kind + Notebook + Parent). The combo cell holds an
         // instance built by one list and the Items hold instances built by another;
@@ -164,15 +174,22 @@ public sealed class MainForm : Form
         _btnStop = AddButton(_top, "Stop", ref x);
         _btnStop.Click += (_, _) => { _cts?.Cancel(); Log("Stop requested — finishing the current page, then stopping."); };
         _btnStop.Enabled = false;
-        _btnToggleAll = AddButton(_top, "Toggle all", ref x);
+        _btnToggleAll = AddButton(_top, "Toggle all files", ref x);
         _btnToggleAll.Click += (_, _) => ToggleAll();
         _btnSave = AddButton(_top, "Save mapping", ref x);
         _btnSave.Click += (_, _) => SaveMappingFromGrid();
         _btnClear = AddButton(_top, "Clear log", ref x);
         _btnClear.Click += (_, _) => { if (_log.IsHandleCreated) _log.Clear(); };
 
-        // Info line.
-        _info = new Label { Dock = DockStyle.Top, Height = 24, TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(8, 0, 0, 0) };
+        // Info line: status label (left) + default-notebook combo + "Set all notebooks" button (right).
+        _infoBar = new Panel { Dock = DockStyle.Top, Height = 30 };
+        _info = new Label { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(8, 0, 0, 0) };
+        _cboDefaultNb = new ComboBox { Dock = DockStyle.Right, Width = 200, DropDownStyle = ComboBoxStyle.DropDownList };
+        _btnSetAllNb = new Button { Dock = DockStyle.Right, Width = 138, Text = "Set all notebooks" };
+        _btnSetAllNb.Click += (_, _) => SetAllNotebooks();
+        _infoBar.Controls.Add(_info);
+        _infoBar.Controls.Add(_cboDefaultNb);
+        _infoBar.Controls.Add(_btnSetAllNb);
 
         // TOP grid: institution -> notebook / target mapping.
         _mapGrid = new DataGridView
@@ -186,9 +203,10 @@ public sealed class MainForm : Form
             BackgroundColor = SystemColors.Window,
         };
         _mapColInst = new DataGridViewTextBoxColumn { HeaderText = "Institution", ReadOnly = true, FillWeight = 22 };
+        _mapColKind = new DataGridViewTextBoxColumn { HeaderText = "Type", ReadOnly = true, FillWeight = 10 };
         _mapColNotebook = new DataGridViewComboBoxColumn { HeaderText = "Notebook", FillWeight = 24 };
         _mapColTarget = new DataGridViewComboBoxColumn { HeaderText = "Target (section or section-group)", FillWeight = 54 };
-        _mapGrid.Columns.AddRange(_mapColInst, _mapColNotebook, _mapColTarget);
+        _mapGrid.Columns.AddRange(_mapColInst, _mapColKind, _mapColNotebook, _mapColTarget);
         _mapGrid.CellBeginEdit += MapGrid_CellBeginEdit;
         _mapGrid.CellEndEdit += MapGrid_CellEndEdit;
         _mapGrid.CellValueChanged += MapGrid_CellValueChanged;
@@ -215,6 +233,9 @@ public sealed class MainForm : Form
         _fileGrid.Columns.AddRange(_colEnabled, _colInst, _colFile, _colOpen, _colDate, _colTitle, _colReset, _colStatus);
         _fileGrid.CellClick += FileGrid_CellClick;
         _fileGrid.CellPainting += FileGrid_CellPaint;
+        // Clicking the "On" column header toggles every file row on/off (select-all switch;
+        // the state box in the header is drawn by FileGrid_CellPaint).
+        _fileGrid.ColumnHeaderMouseClick += (s, e) => { if (e.ColumnIndex == _colEnabled.Index) ToggleAll(); };
         _fileGrid.CellBeginEdit += FileGrid_CellBeginEdit;
         _fileGrid.CellEndEdit += FileGrid_CellEndEdit;
         _fileGrid.CellValueChanged += FileGrid_CellValueChanged;
@@ -238,7 +259,7 @@ public sealed class MainForm : Form
         Controls.Add(_fileGrid);
         Controls.Add(_log);
         Controls.Add(_mapGrid);
-        Controls.Add(_info);
+        Controls.Add(_infoBar);
         Controls.Add(_top);
     }
 
@@ -291,6 +312,7 @@ public sealed class MainForm : Form
     {
         RefreshMapGrid();
         RefreshFileGrid();
+        RefreshDefaultNotebookCombo();
     }
 
     private static string InstOf(StatementFile f)
@@ -334,8 +356,15 @@ public sealed class MainForm : Form
                     opt = new TargetOption(e.Name, e.Kind == "group" ? "group" : "section", e.Notebook, "", e.Parent);
                 nb = e.Notebook;
             }
-            int r = _mapGrid.Rows.Add(inst, nb, opt);
+            // No notebook of its own -> pre-fill with the saved default (future documents get it too).
+            if (string.IsNullOrEmpty(nb) && !string.IsNullOrWhiteSpace(_map.DefaultNotebook))
+                nb = _map.DefaultNotebook!;
+            int r = _mapGrid.Rows.Add(inst, opt?.Kind ?? "", nb, opt);
             _mapGrid.Rows[r].DefaultCellStyle.BackColor = opt == null ? Color.LightYellow : Color.White;
+            PaintKindCell(_mapGrid.Rows[r]);
+            // A saved notebook/target pair that no longer matches (e.g. after a notebook
+            // was bulk-changed) must not linger: clear the stale target.
+            ClearStaleTarget(_mapGrid.Rows[r]);
         }
         _updating = false;
     }
@@ -362,6 +391,10 @@ public sealed class MainForm : Form
                 date = fs.Date;
                 title = string.IsNullOrWhiteSpace(fs.Title) ? Core.DefaultTitle(f) : fs.Title;
             }
+            // Guarantee the Title is never blank: fall back file name -> institution -> "Statement".
+            if (string.IsNullOrWhiteSpace(title))
+                title = !string.IsNullOrWhiteSpace(f.FileName) ? Path.GetFileNameWithoutExtension(f.FileName)
+                      : (!string.IsNullOrWhiteSpace(f.Institution) ? f.Institution : "Statement");
             int r = _fileGrid.Rows.Add(enabled, inst, f.FileName, "Open", date, title, "Reset", "");
         }
         _updating = false;
@@ -416,12 +449,40 @@ public sealed class MainForm : Form
         });
     }
 
-    /// <summary>Fill a per-row Notebook dropdown with all known notebooks.</summary>
+    /// <summary>Fill a per-row Notebook dropdown with all known notebooks (plus any saved value that is no longer in OneNote).</summary>
     private void RefreshNotebookOptions(DataGridViewComboBoxColumn col)
     {
         col.Items.Clear();
         var nbs = AllNotebooks();
+        foreach (var e in _map.Institutions.Values)
+            if (!string.IsNullOrWhiteSpace(e.Notebook) && !nbs.Contains(e.Notebook, StringComparer.OrdinalIgnoreCase))
+                nbs.Add(e.Notebook);
+        string? def = _map.DefaultNotebook;
+        if (!string.IsNullOrWhiteSpace(def) && !nbs.Contains(def, StringComparer.OrdinalIgnoreCase))
+            nbs.Add(def!);
         if (nbs.Count > 0) col.Items.AddRange(nbs.ToArray());
+    }
+
+    /// <summary>Fill the default-notebook combo (all known notebooks + any saved default) and restore the saved selection.</summary>
+    private void RefreshDefaultNotebookCombo()
+    {
+        _cboDefaultNb.Items.Clear();
+        var nbs = AllNotebooks();
+        string? saved = _map.DefaultNotebook;
+        if (!string.IsNullOrEmpty(saved) && !nbs.Contains(saved, StringComparer.OrdinalIgnoreCase))
+        {
+            int i = 0;
+            while (i < nbs.Count && string.Compare(nbs[i], saved, StringComparison.OrdinalIgnoreCase) < 0) i++;
+            nbs.Insert(i, saved!);
+        }
+        if (nbs.Count > 0) _cboDefaultNb.Items.AddRange(nbs.ToArray());
+        if (!string.IsNullOrEmpty(saved))
+            for (int i = 0; i < _cboDefaultNb.Items.Count; i++)
+                if (string.Equals(_cboDefaultNb.Items[i]?.ToString(), saved, StringComparison.OrdinalIgnoreCase))
+                {
+                    _cboDefaultNb.SelectedIndex = i;
+                    break;
+                }
     }
 
     /// <summary>All distinct notebook names in the hierarchy.</summary>
@@ -485,6 +546,36 @@ public sealed class MainForm : Form
     // Grid event handlers
     // ------------------------------------------------------------------
 
+    /// <summary>
+    /// Clear the row's Target when it does not belong to the row's Notebook. A same-named
+    /// section/group in another notebook would otherwise be picked up at run time, so a
+    /// target from a different notebook is never left in place. (A missing notebook is
+    /// left alone — nothing to compare against.)
+    /// </summary>
+    private void ClearStaleTarget(DataGridViewRow row)
+    {
+        string nb = row.Cells[_mapColNotebook.Index].Value?.ToString() ?? "";
+        var opt = ResolveTarget(row.Cells[_mapColTarget.Index].Value);
+        if (opt != null && !string.IsNullOrEmpty(nb) && !string.Equals(opt.Notebook, nb, StringComparison.OrdinalIgnoreCase))
+        {
+            row.Cells[_mapColTarget.Index].Value = null;
+            row.Cells[_mapColKind.Index].Value = "";
+            PaintKindCell(row);
+        }
+    }
+
+    /// <summary>
+    /// Color the read-only Type cell: lavender = group, light green = section, default = none.
+    /// </summary>
+    private void PaintKindCell(DataGridViewRow row)
+    {
+        var cell = row.Cells[_mapColKind.Index];
+        string kind = cell.Value?.ToString() ?? "";
+        cell.Style.BackColor = kind == "group" ? Color.FromArgb(230, 225, 250) : (kind == "section" ? Color.FromArgb(214, 238, 214) : Color.Empty);
+        cell.Style.SelectionBackColor = cell.Style.BackColor;
+        cell.Style.SelectionForeColor = cell.Style.ForeColor;
+    }
+
     /// <summary>Per-row filter: opening the Target dropdown shows only that row's Notebook targets.</summary>
     private void MapGrid_CellBeginEdit(object? sender, DataGridViewCellCancelEventArgs e)
     {
@@ -506,14 +597,8 @@ public sealed class MainForm : Form
         if (e.ColumnIndex == _mapColNotebook.Index)
         {
             // Notebook changed: clear a target that no longer belongs to this notebook.
-            string nb = row.Cells[_mapColNotebook.Index].Value?.ToString() ?? "";
-            var opt = ResolveTarget(row.Cells[_mapColTarget.Index].Value);
             _updating = true;
-            try
-            {
-                if (opt != null && !string.IsNullOrEmpty(nb) && opt.Notebook != nb)
-                    row.Cells[_mapColTarget.Index].Value = null;
-            }
+            try { ClearStaleTarget(row); }
             finally { _updating = false; }
         }
         else if (e.ColumnIndex == _mapColTarget.Index)
@@ -525,6 +610,9 @@ public sealed class MainForm : Form
             {
                 if (raw is string && opt != null)
                     row.Cells[_mapColTarget.Index].Value = opt;
+                // Keep the read-only Type column (and its color) in sync with the picked target.
+                row.Cells[_mapColKind.Index].Value = opt?.Kind ?? "";
+                PaintKindCell(row);
                 // Auto-sync the Notebook column to the picked target's notebook.
                 if (opt != null && !string.IsNullOrEmpty(opt.Notebook))
                     row.Cells[_mapColNotebook.Index].Value = opt.Notebook;
@@ -587,28 +675,104 @@ public sealed class MainForm : Form
     /// The cell's value stays the base title, so the run pipeline can derive the final name
     /// without double-prefixing the date.
     /// </summary>
-    private void FileGrid_CellPaint(object? sender, DataGridViewCellPaintingEventArgs e)
+    private void FileGrid_CellPaintTitle(object? sender, DataGridViewCellPaintingEventArgs e)
     {
         if (e.RowIndex < 0 || e.ColumnIndex != _colTitle.Index) return;
         if (e.RowIndex == _editingTitleRow) return; // let the edit control show the base title
-        var row = _fileGrid.Rows[e.RowIndex];
-        string file = row.Cells[_colFile.Index].Value?.ToString() ?? "";
-        var f = _files.FirstOrDefault(x => string.Equals(x.FileName, file, StringComparison.OrdinalIgnoreCase));
-        string baseTitle = row.Cells[_colTitle.Index].Value?.ToString() ?? "";
-        bool date = (bool)(row.Cells[_colDate.Index].Value ?? false);
-        string full = f != null ? Core.PageTitle(f, baseTitle, date) : baseTitle;
-        var cell = row.Cells[e.ColumnIndex];
-        bool isSelected = row.Selected || _fileGrid.SelectedCells.Contains(cell) || _fileGrid.CurrentCell == cell;
-        e.PaintBackground(e.CellBounds, isSelected);
-        var font = row.DefaultCellStyle.Font ?? _fileGrid.Font;
-        using (var br = new SolidBrush(row.DefaultCellStyle.ForeColor))
+        try
         {
-            var sz = e.Graphics.MeasureString(full, font);
-            e.Graphics.DrawString(full, font, br,
-                e.CellBounds.Left + 4,
-                e.CellBounds.Top + Math.Max(0f, (e.CellBounds.Height - sz.Height) / 2f));
+            var row = _fileGrid.Rows[e.RowIndex];
+            string file = row.Cells[_colFile.Index].Value?.ToString() ?? "";
+            var f = _files.FirstOrDefault(x => string.Equals(x.FileName, file, StringComparison.OrdinalIgnoreCase));
+            string baseTitle = row.Cells[_colTitle.Index].Value?.ToString() ?? "";
+            bool date = (bool)(row.Cells[_colDate.Index].Value ?? false);
+            // The preview is NEVER allowed to be blank: full title -> base title -> file name -> institution.
+            string full = f != null ? Core.PageTitle(f, baseTitle, date) : baseTitle;
+            if (string.IsNullOrWhiteSpace(full))
+                full = !string.IsNullOrWhiteSpace(baseTitle) ? baseTitle
+                     : (!string.IsNullOrWhiteSpace(file) ? System.IO.Path.GetFileNameWithoutExtension(file) : "");
+            if (string.IsNullOrWhiteSpace(full))
+            {
+                e.Handled = false; // nothing to draw -> let the default renderer show the base value
+                return;
+            }
+            var cell = row.Cells[e.ColumnIndex];
+            bool isSelected = row.Selected || _fileGrid.SelectedCells.Contains(cell) || _fileGrid.CurrentCell == cell;
+            e.PaintBackground(e.CellBounds, isSelected);
+            var font = row.DefaultCellStyle.Font ?? _fileGrid.Font ?? SystemFonts.DefaultFont;
+            using (var br = new SolidBrush(row.DefaultCellStyle.ForeColor))
+            {
+                var sz = e.Graphics.MeasureString(full, font);
+                e.Graphics.DrawString(full, font, br,
+                    e.CellBounds.Left + 4,
+                    e.CellBounds.Top + Math.Max(0f, (e.CellBounds.Height - sz.Height) / 2f));
+            }
+            e.Handled = true;
         }
-        e.Handled = true;
+        catch
+        {
+            // Any paint failure: do NOT suppress the default renderer, so the cell still shows
+            // its (non-empty) base title and the title column is never blank.
+            e.Handled = false;
+        }
+    }
+
+    /// <summary>
+    /// Paint handler for the file grid: the "On" header gets a state box (filled = all on,
+    /// half = mixed, empty = all off) so it is obvious the header can be clicked to toggle
+    /// every file row; everything else is delegated to the Title preview painter.
+    /// </summary>
+    private void FileGrid_CellPaint(object? sender, DataGridViewCellPaintingEventArgs e)
+    {
+        // CellPainting can also fire for column header cells. In the "On" header, draw the
+        // default header plus a state box (filled = all on, half = mixed, empty = all off)
+        // so it is obvious the header can be clicked to toggle every file row.
+        if (HeaderColumnAt(e.CellBounds) == _colEnabled.Index)
+        {
+            e.Paint(e.CellBounds, DataGridViewPaintParts.All);
+            int allOn = 0, anyOff = 0;
+            foreach (DataGridViewRow r in _fileGrid.Rows)
+                if (r.Cells[_colEnabled.Index].Value is bool b) { if (b) allOn++; else anyOff++; }
+            int s = 12;
+            int x = e.CellBounds.Right - s - 2;
+            int y = e.CellBounds.Top + (e.CellBounds.Height - s) / 2;
+            var box = new Rectangle(x, y, s, s);
+            using (var pen = new Pen(SystemColors.ControlDark))
+                e.Graphics.DrawRectangle(pen, box);
+            using (var br = new SolidBrush(SystemColors.ControlDark))
+            {
+                if (allOn > 0 && anyOff == 0)
+                    e.Graphics.FillRectangle(br, box);
+                else if (allOn > 0 && anyOff > 0)
+                    e.Graphics.FillRectangle(br, x + 2, y + s / 2 - 1, s - 4, 2);
+            }
+            e.Handled = true;
+            return;
+        }
+        if (e.RowIndex < 0) return; // other header cells (if painted) keep their default rendering
+        FileGrid_CellPaintTitle(sender, e);
+    }
+
+    /// <summary>
+    /// The index of the column whose header cell <c>cellBounds</c> belongs to, or -1.
+    /// (This API surface has no HeaderCell.Bounds, so the header strip is located via the
+    /// display rectangle and the accumulated column widths.)
+    /// </summary>
+    private int HeaderColumnAt(Rectangle cellBounds)
+    {
+        if (!_fileGrid.IsHandleCreated) return -1;
+        int top = _fileGrid.DisplayRectangle.Top;
+        int bottom = top + _fileGrid.ColumnHeadersHeight;
+        if (cellBounds.Top < top || cellBounds.Top >= bottom) return -1;
+        int x = _fileGrid.DisplayRectangle.Left;
+        foreach (DataGridViewColumn c in _fileGrid.Columns)
+        {
+            int w = c.Width;
+            if (w <= 0) continue;
+            if (cellBounds.Left >= x && cellBounds.Left < x + w) return c.Index;
+            x += w;
+        }
+        return -1;
     }
 
     private void FileGrid_CellBeginEdit(object? sender, DataGridViewCellCancelEventArgs e)
@@ -999,8 +1163,12 @@ public sealed class MainForm : Form
         if (entry.Kind == "group")
         {
             string notebookId = NotebookId(h, notebook);
+            // A same-named group in ANOTHER notebook must not be picked when a notebook is
+            // requested (the old cross-notebook fallback is allowed only when no notebook was set).
             var g = h.Groups.FirstOrDefault(x => x.Name.Equals(entry.Name, StringComparison.OrdinalIgnoreCase) && SameParent(x.Parent, notebookId))
-                  ?? h.Groups.FirstOrDefault(x => x.Name.Equals(entry.Name, StringComparison.OrdinalIgnoreCase))
+                  ?? (string.IsNullOrEmpty(notebook)
+                      ? h.Groups.FirstOrDefault(x => x.Name.Equals(entry.Name, StringComparison.OrdinalIgnoreCase))
+                      : null)
                   ?? throw new Exception($"Section group \"{entry.Name}\" not found in notebook \"{notebook}\".");
             string baseName = (title.Length == 0) ? g.Name : title;
             string name = $"{baseName} {year}";
@@ -1028,7 +1196,15 @@ public sealed class MainForm : Form
             parentID = h.Groups.FirstOrDefault(x => x.Name.Equals(parentName, StringComparison.OrdinalIgnoreCase)
                 && (string.IsNullOrEmpty(notebook) || x.Notebook.Equals(notebook, StringComparison.OrdinalIgnoreCase)))?.ObjectID ?? "";
 
-        var sec = h.Sections.FirstOrDefault(s => s.Name.Equals(entry.Name, StringComparison.OrdinalIgnoreCase) && SameParent(s.Parent, parentID));
+        // Prefer a section in the requested notebook: a same-named section in ANOTHER
+        // notebook must not be picked when a notebook is requested (only fall back to any
+        // notebook when no notebook was set at all).
+        var sec = h.Sections.FirstOrDefault(s => s.Name.Equals(entry.Name, StringComparison.OrdinalIgnoreCase)
+                && SameParent(s.Parent, parentID)
+                && (string.IsNullOrEmpty(notebook) || s.Notebook.Equals(notebook, StringComparison.OrdinalIgnoreCase)))
+              ?? (string.IsNullOrEmpty(notebook)
+                  ? h.Sections.FirstOrDefault(s => s.Name.Equals(entry.Name, StringComparison.OrdinalIgnoreCase) && SameParent(s.Parent, parentID))
+                  : null);
         if (sec != null) return sec;
 
         try
@@ -1084,10 +1260,46 @@ public sealed class MainForm : Form
         finally { _updating = false; }
     }
 
+    /// <summary>
+    /// "Set all notebooks": set the Notebook column of every institution row to the
+    /// selected default notebook. Targets (section / section-group) are left untouched —
+    /// tweak those per row afterwards. Also saves the default so institutions without a
+    /// notebook of their own (including future documents) get it automatically.
+    /// </summary>
+    private void SetAllNotebooks()
+    {
+        string nb = _cboDefaultNb.SelectedItem?.ToString() ?? "";
+        if (nb.Length == 0)
+        {
+            Log("Set all notebooks: pick a notebook in the default list first (next to this button).", error: true);
+            return;
+        }
+        int n = 0;
+        _updating = true;
+        try
+        {
+            foreach (DataGridViewRow row in _mapGrid.Rows)
+            {
+                row.Cells[_mapColNotebook.Index].Value = nb;
+                // The cell handler is suppressed while _updating, so clear a target that no
+                // longer belongs to this notebook here, too (otherwise a same-named section
+                // in another notebook would be picked up at run time).
+                ClearStaleTarget(row);
+                n++;
+            }
+        }
+        finally { _updating = false; }
+        _map.DefaultNotebook = nb;
+        SaveMappingFromGrid(silent: true);
+        Log($"Set notebook '{nb}' on all {n} institution row(s) — targets left as-is, tweak per row as needed. Default saved for future documents.");
+    }
+
     /// <summary>Persist the grids' state to onemap.json: institution mapping (top) + per-file settings (bottom).</summary>
     private void SaveMappingFromGrid(bool silent = false)
     {
         var map = new OneMap();
+        // Default notebook: the combo's selection, or the previous value if nothing is picked yet.
+        map.DefaultNotebook = _cboDefaultNb.SelectedItem as string ?? _map.DefaultNotebook;
 
         // Per-institution mapping from the TOP grid.
         foreach (DataGridViewRow row in _mapGrid.Rows)
@@ -1125,8 +1337,11 @@ public sealed class MainForm : Form
         {
             string mapPath = Core.MapPath(_root);
             Core.SaveMap(mapPath, map);
+            _map.DefaultNotebook = map.DefaultNotebook;   // keep in-memory state in sync
             if (!silent)
-                Log($"Saved {map.Institutions.Count} institution mapping(s) and {map.Files.Count} file setting(s) to {mapPath}");
+                Log($"Saved {map.Institutions.Count} institution mapping(s)" +
+                    (string.IsNullOrWhiteSpace(map.DefaultNotebook) ? "" : $" (default notebook: {map.DefaultNotebook})") +
+                    $" and {map.Files.Count} file setting(s) to {mapPath}");
         }
         catch (Exception e)
         {

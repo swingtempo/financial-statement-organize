@@ -9,6 +9,13 @@ public sealed class OneMap
     public Dictionary<string, MapEntry> Institutions { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     /// <summary>Per-file settings (enabled + title), keyed by file name.</summary>
     public Dictionary<string, FileSetting> Files { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>
+    /// Default notebook (set via the "Set all notebooks" button). Institutions without a
+    /// notebook of their own — including future documents — are pre-filled with it, so
+    /// the notebook only has to be chosen once. Target (section / section-group) is NOT
+    /// part of this; it stays per-institution.
+    /// </summary>
+    public string? DefaultNotebook { get; set; }
 }
 
 public sealed class MapEntry
