@@ -61,6 +61,7 @@ public sealed class MainForm : Form
     private DataGridViewButtonColumn _colReset = null!;
     private DataGridViewTextBoxColumn _colStatus = null!;
     private int _editingTitleRow = -1;
+    private bool _titlePaintDiagLogged;
 
     private RichTextBox _log = null!;
     private readonly List<string> _pendingLog = new();
@@ -254,10 +255,19 @@ public sealed class MainForm : Form
             Font = new Font("Consolas", 9f),
         };
 
+        // Drag handles so the user can resize the sections: one between the mapping grid
+        // and the file grid, one between the file grid and the log.
+        var splitTop = new Splitter { Dock = DockStyle.Top, Height = 5 };
+        var splitBottom = new Splitter { Dock = DockStyle.Bottom, Height = 5 };
+
         // Order matters for Dock layout. For Dock=Top, the control added LAST is
-        // outermost (topmost), so add mapGrid, then info, then top. Fill goes last.
+        // outermost (topmost); for Dock=Bottom, added LAST is bottommost. So the top
+        // stack (top -> down) is: top, infoBar, mapGrid, splitTop; the bottom stack
+        // (bottom -> up) is: log, splitBottom; the file grid fills the middle.
+        Controls.Add(splitBottom);
         Controls.Add(_fileGrid);
         Controls.Add(_log);
+        Controls.Add(splitTop);
         Controls.Add(_mapGrid);
         Controls.Add(_infoBar);
         Controls.Add(_top);
@@ -686,6 +696,14 @@ public sealed class MainForm : Form
             var f = _files.FirstOrDefault(x => string.Equals(x.FileName, file, StringComparison.OrdinalIgnoreCase));
             string baseTitle = row.Cells[_colTitle.Index].Value?.ToString() ?? "";
             bool date = (bool)(row.Cells[_colDate.Index].Value ?? false);
+            // One-time diagnostic: proves the custom paint is running (fresh binary) and shows what it draws.
+            if (!_titlePaintDiagLogged)
+            {
+                _titlePaintDiagLogged = true;
+                LogGrid("[diag] Title custom paint RUNNING (fresh build). first cell: file=" + (file == "" ? "<empty>" : "'" + file + "'")
+                    + " baseTitle=" + (baseTitle == "" ? "<empty>" : "'" + baseTitle + "'")
+                    + " valueIsNullOrWhiteSpace(base)=" + string.IsNullOrWhiteSpace(baseTitle));
+            }
             // The preview is NEVER allowed to be blank: full title -> base title -> file name -> institution.
             string full = f != null ? Core.PageTitle(f, baseTitle, date) : baseTitle;
             if (string.IsNullOrWhiteSpace(full))
@@ -699,8 +717,14 @@ public sealed class MainForm : Form
             var cell = row.Cells[e.ColumnIndex];
             bool isSelected = row.Selected || _fileGrid.SelectedCells.Contains(cell) || _fileGrid.CurrentCell == cell;
             e.PaintBackground(e.CellBounds, isSelected);
+            // An unset ForeColor is Color.Empty (fully transparent) -> would draw invisible text.
+            // Resolve it to a real color matching the background PaintBackground just drew
+            // (Highlight when selected, Window otherwise) so the title is always visible.
+            var fg = row.DefaultCellStyle.ForeColor;
+            if (fg == Color.Empty)
+                fg = isSelected ? SystemColors.HighlightText : SystemColors.WindowText;
             var font = row.DefaultCellStyle.Font ?? _fileGrid.Font ?? SystemFonts.DefaultFont;
-            using (var br = new SolidBrush(row.DefaultCellStyle.ForeColor))
+            using (var br = new SolidBrush(fg))
             {
                 var sz = e.Graphics.MeasureString(full, font);
                 e.Graphics.DrawString(full, font, br,
@@ -1036,7 +1060,7 @@ public sealed class MainForm : Form
             {
                 var accRows = Core.BuildAccountRows(f);
                 var entry = new MapEntry { Kind = rr.Target.Kind, Name = rr.Target.Name };
-                var sec = ResolveSection(onenote!, ref h!, entry, year, rr.Notebook, rr.Title, rr.Target.ParentName);
+                var sec = ResolveSection(onenote!, ref h!, entry, year, rr.Notebook, rr.Target.ParentName);
                 Log($"    -> [{sec.Notebook}] {sec.Name} / {pageName}");
 
                 // Don't create a page whose title already exists in the target section.
@@ -1113,7 +1137,7 @@ public sealed class MainForm : Form
             }
             Log($"TEST target section: {target.Name} in {target.Notebook}");
             Log("TEST: ensuring section ...");
-            var sec = ResolveSection(onenote, ref _hierarchy!, new MapEntry { Kind = target.Kind, Name = target.Name }, 2026, target.Notebook, "", target.ParentName);
+            var sec = ResolveSection(onenote, ref _hierarchy!, new MapEntry { Kind = target.Kind, Name = target.Name }, 2026, target.Notebook, target.ParentName);
             Log("TEST: creating page ...");
             string pageId = onenote.CreateNote(sec.ObjectID, "TEST " + DateTime.Now.ToString("HHmmss"));
             Log("TEST page id: " + pageId);
@@ -1153,13 +1177,18 @@ public sealed class MainForm : Form
 
     /// <summary>
     /// Resolve the target section, creating it if needed.
-    ///  - "group"  -> use the group as the parent; ensure a section "{Title} {year}" exists in it.
+    ///  - "group"  -> use the group as the parent; the statement's section is "\{Group\} {year}"
+    ///                (e.g. "Fidelity 2026"). Every institution mapped to the group in that year
+    ///                shares the one section. Prefer an EXISTING section (created by the user);
+    ///                create as a fallback only.
     ///  - "section"-> find/create the section in that notebook (disambiguated by the
     ///                containing group, resolved from <c>parentName</c> to an ObjectID).
     /// </summary>
-    private static SectionInfo ResolveSection(OneNote onenote, ref Hierarchy h, MapEntry entry, int year, string notebook, string title, string parentName)
+    private static SectionInfo ResolveSection(OneNote onenote, ref Hierarchy h, MapEntry entry, int year, string notebook, string parentName)
     {
-        // Section-group target: ensure "{Title} {year}" section exists inside it.
+        // Section-group target: the section is "\{group\} {year}" (e.g. "Fidelity 2026").
+        // Multiple institutions can map to the same group; they all share that one section.
+        // Prefer an existing section (the user pre-creates them); create as a fallback.
         if (entry.Kind == "group")
         {
             string notebookId = NotebookId(h, notebook);
@@ -1170,8 +1199,7 @@ public sealed class MainForm : Form
                       ? h.Groups.FirstOrDefault(x => x.Name.Equals(entry.Name, StringComparison.OrdinalIgnoreCase))
                       : null)
                   ?? throw new Exception($"Section group \"{entry.Name}\" not found in notebook \"{notebook}\".");
-            string baseName = (title.Length == 0) ? g.Name : title;
-            string name = $"{baseName} {year}";
+            string name = $"{g.Name} {year}";
             var existing = h.Sections.FirstOrDefault(s => s.Name.Equals(name, StringComparison.OrdinalIgnoreCase) && SameParent(s.Parent, g.ObjectID));
             if (existing != null) return existing;
             try
