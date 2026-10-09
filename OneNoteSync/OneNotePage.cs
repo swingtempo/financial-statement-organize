@@ -21,13 +21,15 @@ namespace OneNoteSync
         {
             public string Date { get; set; } = "";
             public string Name { get; set; } = "";
+            public string Owner { get; set; } = "";
             public string Balance { get; set; } = "";
+            public List<string> Holdings { get; set; } = new();
             public List<string> Notes { get; set; } = new();
         }
 
-        // Column widths (points) for Date | Account | Balance | Notes.
-        static readonly double[] ColWidths = { 90, 200, 110, 240 };
-        static readonly string[] ColHeaders = { "Date", "Account", "Balance", "Notes" };
+        // Column widths (points) for Date | Account | Owner | Balance | Holdings | Notes.
+        static readonly double[] ColWidths = { 75, 150, 95, 90, 200, 150 };
+        static readonly string[] ColHeaders = { "Date", "Account", "Owner", "Balance", "Holdings", "Notes" };
 
         /// <summary>Builds the &lt;one:Outline&gt; body to insert before &lt;/one:Page&gt;.</summary>
         public static string BuildBody(string title, List<AccountRow> rows,
@@ -116,15 +118,10 @@ namespace OneNoteSync
                 sb.Append("<one:Row>");
                 sb.Append(Cell(now, r.Date));
                 sb.Append(Cell(now, r.Name));
+                sb.Append(Cell(now, r.Owner));
                 sb.Append(Cell(now, r.Balance));
-                // Notes: one OE per verbatim note line (empty OE when there are none).
-                sb.Append("<one:Cell><one:OEChildren>");
-                if (r.Notes != null && r.Notes.Count > 0)
-                    foreach (var n in r.Notes)
-                        sb.Append(OE(now, n));
-                else
-                    sb.Append(OE(now, ""));
-                sb.Append("</one:OEChildren></one:Cell>");
+                sb.Append(MultiLineCell(now, r.Holdings));
+                sb.Append(MultiLineCell(now, r.Notes));
                 sb.Append("</one:Row>");
             }
 
@@ -149,6 +146,21 @@ namespace OneNoteSync
 
         static string Cell(string now, string text)
             => "<one:Cell><one:OEChildren>" + OE(now, text) + "</one:OEChildren></one:Cell>";
+
+        // A cell with one OE per line (empty OE when there are no lines) - used for the
+        // multi-line Holdings and Notes columns.
+        static string MultiLineCell(string now, List<string> lines)
+        {
+            var sb = new StringBuilder();
+            sb.Append("<one:Cell><one:OEChildren>");
+            if (lines != null && lines.Count > 0)
+                foreach (var l in lines)
+                    sb.Append(OE(now, l));
+            else
+                sb.Append(OE(now, ""));
+            sb.Append("</one:OEChildren></one:Cell>");
+            return sb.ToString();
+        }
 
         static string OEOpen(string now)
             => "<one:OE creationTime=\"" + now + "\" lastModifiedTime=\"" + now + "\" alignment=\"left\">";

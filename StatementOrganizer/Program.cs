@@ -138,6 +138,16 @@ static string BuildPrompt(string fileName, string source) =>
       "Bank" covers any bank, credit union, credit card, checking or savings statement that is
       not from Fidelity or Vanguard.
     - Extract EVERY distinct statement/account found in the document, one entry each.
+    - accountName = the name/type of the account exactly as printed on the statement
+      (e.g. "Roth IRA", "Total Rewards Credit Card", "Premier Checking"). Always fill it in
+      for every statement entry; only leave it empty if no account name is present at all.
+    - accountNumber = a fragment of the account number if printed (prefer the last 4 digits);
+      use null if none is present.
+    - ownerName = the HUMAN account-holder name as printed on the statement (e.g. "Nathan Doe").
+      This is the person's name, NOT the account or institution name. Use null if none is shown.
+    - holdings = for brokerage / investment accounts only: the list of holdings/positions shown.
+      For EACH holding give its name (or symbol), and its quantity and market value if present.
+      Use an empty list [] for non-brokerage accounts (checking / savings / credit card).
     - Dates must be ISO format (yyyy-MM-dd). Use null for anything not present.
     - Balances: use the closing/current balance for "balance". Do not invent numbers.
     - statementDate = the date the statement was issued. dueDate = payment due date (credit cards /
@@ -151,8 +161,10 @@ static string BuildPrompt(string fileName, string source) =>
       "statements": [
         {
           "institution": "...",
-          "accountName": "...",
-          "accountNumber": "... or null",
+          "accountName": "name/type of the account as printed (always fill in)",
+          "accountNumber": "last 4 digits of the account number, or null",
+          "ownerName": "human account-holder name as printed, or null",
+          "holdings": [{ "name": "security name or symbol", "quantity": "... or null", "value": "... or null" }],
           "statementType": "...",
           "openingBalance": 0.0,
           "closingBalance": 0.0,

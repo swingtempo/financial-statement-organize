@@ -131,11 +131,23 @@ public static class Core
                 Date = date,
                 Name = st.AccountName
                       + (string.IsNullOrWhiteSpace(st.AccountNumber) ? "" : $" (\u2026{st.AccountNumber})"),
+                Owner = st.OwnerName ?? "",
                 Balance = Money(st.Balance),
+                Holdings = (st.Holdings ?? new List<Holding>()).Select(FormatHolding).ToList(),
                 Notes = st.Notes
             });
         }
         return rows;
+    }
+
+    /// <summary>Format one holding as a table line: "Name — quantity — value" (only the parts present).</summary>
+    static string FormatHolding(Holding h)
+    {
+        var parts = new List<string>();
+        if (!string.IsNullOrWhiteSpace(h.Name)) parts.Add(h.Name);
+        if (!string.IsNullOrWhiteSpace(h.Quantity)) parts.Add(h.Quantity);
+        if (!string.IsNullOrWhiteSpace(h.Value)) parts.Add(h.Value);
+        return string.Join("  \u2014  ", parts);
     }
 
     public static string PageName(Statement st)

@@ -61,5 +61,24 @@ public class Statement
     /// <summary>Amount due, if present (credit cards).</summary>
     public decimal? AmountDue { get; set; }
 
+    /// <summary>Human account-holder name as printed (e.g. "Nathan Doe"); null if not present.</summary>
+    public string? OwnerName { get; set; }
+
+    /// <summary>For brokerage/investment accounts: the list of holdings/positions. Empty for other types.</summary>
+    public List<Holding> Holdings { get; set; } = new();
+
     public List<string> Notes { get; set; } = new();
+}
+
+/// <summary>One holding/position in a brokerage (investment) account.</summary>
+public class Holding
+{
+    /// <summary>Security name or symbol (e.g. "Apple Inc" or "AAPL").</summary>
+    public string Name { get; set; } = "";
+
+    /// <summary>Quantity / number of shares or units, if shown.</summary>
+    public string? Quantity { get; set; }
+
+    /// <summary>Market value of the position, if shown.</summary>
+    public string? Value { get; set; }
 }
