@@ -66,13 +66,14 @@ namespace OneNoteSync
             }
 
             // 4. Page images as one:Image with inline base64 Data
+            const double imageScale = 1.1;   // render slightly larger than native size
             if (rasters != null)
             {
                 foreach (var r in rasters)
                 {
                     var (w, h) = PngSize(r.Png);
-                    double pw = w * 72.0 / dpi;   // points
-                    double ph = h * 72.0 / dpi;
+                    double pw = w * 72.0 / dpi * imageScale;   // points
+                    double ph = h * 72.0 / dpi * imageScale;
                     string b64 = Convert.ToBase64String(r.Png);
                     sb.Append(OEOpen(now));
                     sb.Append("<one:Image isPrintOut=\"true\" backgroundImage=\"true\" format=\"auto\">")

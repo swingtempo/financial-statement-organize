@@ -145,6 +145,10 @@ static string BuildPrompt(string fileName, string source) =>
       use null if none is present.
     - ownerName = the HUMAN account-holder name as printed on the statement (e.g. "Nathan Doe").
       This is the person's name, NOT the account or institution name. Use null if none is shown.
+      * UTMA / minor / "Custodian for ..." / "by [Name] as custodian" accounts: the owner is the
+        CHILD (the minor beneficiary), NOT the custodian. E.g. "Custodian for Emma Smith" ->
+        "Emma Smith"; "John Smith, by Jane Smith as custodian" -> "John Smith". Do not use the
+        custodian's name.
     - holdings = for brokerage / investment accounts only: the list of holdings/positions shown.
       For EACH holding give its name (or symbol), and its quantity and market value if present.
       Use an empty list [] for non-brokerage accounts (checking / savings / credit card).
