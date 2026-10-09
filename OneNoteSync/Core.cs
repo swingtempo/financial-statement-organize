@@ -183,20 +183,23 @@ public static class Core
     {
         string t = Sanitize(title);
         if (t.Length == 0) t = Sanitize(DefaultTitle(f));
-
-        // When there is only ONE account, insert the holder's first name right after the
-        // date (e.g. "2024-05 Nathan <title>") - the holder is unambiguous with a single account.
-        string first = f.Statements.Count == 1 ? Sanitize(FirstName(f.Statements[0].OwnerName)) : "";
-
         if (!prependDate)
-        {
-            string plain = first.Length > 0 ? $"{first} {t}" : t;
-            return plain.Length > 60 ? plain.Substring(0, 60).Trim() : plain;
-        }
+            return t.Length > 60 ? t.Substring(0, 60).Trim() : t;
         var dates = f.Statements.Where(s => s.StatementDate.HasValue).Select(s => s.StatementDate!.Value).ToList();
         string ym = dates.Count > 0 ? dates.Max().ToString("yyyy-MM") : DateTime.Now.ToString("yyyy-MM");
-        string name = first.Length > 0 ? $"{ym} {first} {t}" : $"{ym} {t}";
+        string name = $"{ym} {t}";
         return name.Length > 60 ? name.Substring(0, 60).Trim() : name;
+    }
+
+    /// <summary>
+    /// If the file has exactly one account with an owner, prepend the holder's first name to
+    /// the title (used to prefill the editable Title cell); otherwise returns the title as-is.
+    /// </summary>
+    public static string TitleWithOwner(StatementFile f, string title)
+    {
+        if (f.Statements.Count != 1) return title;
+        string first = FirstName(f.Statements[0].OwnerName);
+        return first.Length > 0 ? $"{first} {title}" : title;
     }
 
     /// <summary>The first name of a full name ("Nathan Doe" -&gt; "Nathan"); "" when absent.</summary>

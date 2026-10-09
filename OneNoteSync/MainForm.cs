@@ -395,12 +395,22 @@ public sealed class MainForm : Form
             bool enabled = true;
             bool date = false;
             string title = Core.DefaultTitle(f);
+            bool customized = false;
             if (_map.Files.TryGetValue(f.FileName, out var fs))
             {
                 enabled = fs.Enabled;
                 date = fs.Date;
-                title = string.IsNullOrWhiteSpace(fs.Title) ? Core.DefaultTitle(f) : fs.Title;
+                if (!string.IsNullOrWhiteSpace(fs.Title))
+                {
+                    title = fs.Title;   // the user's explicit title (respect it as-is)
+                    customized = true;
+                }
             }
+            // Put the holder's first name into the editable Title cell when the title is still
+            // the default (not customized), so it is visible and editable. Once saved, the name
+            // is part of the title, so it is not prepended a second time.
+            if (!customized)
+                title = Core.TitleWithOwner(f, title);
             // Guarantee the Title is never blank: fall back file name -> institution -> "Statement".
             if (string.IsNullOrWhiteSpace(title))
                 title = !string.IsNullOrWhiteSpace(f.FileName) ? Path.GetFileNameWithoutExtension(f.FileName)
@@ -672,7 +682,7 @@ public sealed class MainForm : Form
         var row = _fileGrid.Rows[rowIndex];
         string file = row.Cells[_colFile.Index].Value?.ToString() ?? "";
         var f = _files.FirstOrDefault(x => string.Equals(x.FileName, file, StringComparison.OrdinalIgnoreCase));
-        string defaultTitle = f != null ? Core.DefaultTitle(f) : "";
+        string defaultTitle = f != null ? Core.TitleWithOwner(f, Core.DefaultTitle(f)) : "";
         _updating = true;
         row.Cells[_colTitle.Index].Value = defaultTitle;
         row.Cells[_colDate.Index].Value = false;
