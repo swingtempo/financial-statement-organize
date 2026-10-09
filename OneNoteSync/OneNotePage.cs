@@ -23,7 +23,7 @@ namespace OneNoteSync
             public string Name { get; set; } = "";
             public string Owner { get; set; } = "";
             public string Balance { get; set; } = "";
-            public List<string> Holdings { get; set; } = new();
+            public List<Holding> Holdings { get; set; } = new();
             public List<string> Notes { get; set; } = new();
         }
 
@@ -120,7 +120,7 @@ namespace OneNoteSync
                 sb.Append(Cell(now, r.Name));
                 sb.Append(Cell(now, r.Owner));
                 sb.Append(Cell(now, r.Balance));
-                sb.Append(MultiLineCell(now, r.Holdings));
+                sb.Append(HoldingsCell(now, r.Holdings));
                 sb.Append(MultiLineCell(now, r.Notes));
                 sb.Append("</one:Row>");
             }
@@ -148,7 +148,7 @@ namespace OneNoteSync
             => "<one:Cell><one:OEChildren>" + OE(now, text) + "</one:OEChildren></one:Cell>";
 
         // A cell with one OE per line (empty OE when there are no lines) - used for the
-        // multi-line Holdings and Notes columns.
+        // multi-line Notes column.
         static string MultiLineCell(string now, List<string> lines)
         {
             var sb = new StringBuilder();
@@ -158,6 +158,33 @@ namespace OneNoteSync
                     sb.Append(OE(now, l));
             else
                 sb.Append(OE(now, ""));
+            sb.Append("</one:OEChildren></one:Cell>");
+            return sb.ToString();
+        }
+
+        // Renders the Holdings column so it is easy to scan: each holding is a small two-line
+        // block - the security name on its own line, then its quantity + value indented below -
+        // with a blank line between holdings for visual separation.
+        static string HoldingsCell(string now, List<Holding> holdings)
+        {
+            var sb = new StringBuilder();
+            sb.Append("<one:Cell><one:OEChildren>");
+            bool any = false;
+            if (holdings != null)
+            {
+                foreach (var h in holdings)
+                {
+                    if (any) sb.Append(OE(now, ""));          // blank line between holdings
+                    any = true;
+                    sb.Append(OE(now, h.Name ?? ""));         // name on its own line
+                    var detail = new List<string>();
+                    if (!string.IsNullOrWhiteSpace(h.Quantity)) detail.Add(h.Quantity!);
+                    if (!string.IsNullOrWhiteSpace(h.Value)) detail.Add(h.Value!);
+                    if (detail.Count > 0)
+                        sb.Append(OE(now, "   " + string.Join("  \u2014  ", detail)));
+                }
+            }
+            if (!any) sb.Append(OE(now, ""));                 // empty cell when no holdings
             sb.Append("</one:OEChildren></one:Cell>");
             return sb.ToString();
         }
