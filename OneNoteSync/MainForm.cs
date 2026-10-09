@@ -985,6 +985,10 @@ public sealed class MainForm : Form
             return;
         }
 
+        // A run always persists the mapping the user has set in the grids (notebook/target
+        // per institution, per-file settings, and the default notebook) before it runs.
+        SaveMappingFromGrid();
+
         var rows = SnapshotRunRows();
 
         OneNote? onenote = null;
