@@ -180,7 +180,7 @@ namespace OneNoteSync
                     sb.Append(OE(now, h.Name ?? ""));         // name on its own line
                     var detail = new List<string>();
                     if (!string.IsNullOrWhiteSpace(h.Quantity)) detail.Add(h.Quantity!);
-                    if (!string.IsNullOrWhiteSpace(h.Value)) detail.Add(h.Value!);
+                    if (!string.IsNullOrWhiteSpace(h.Value)) detail.Add("$" + h.Value!);
                     if (detail.Count > 0)
                         sb.Append(OE(now, "   " + string.Join("  \u2014  ", detail)));
                 }
