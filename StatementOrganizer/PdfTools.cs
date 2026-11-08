@@ -1,10 +1,7 @@
 using System.Diagnostics;
-using System.IO.Compression;
-using System.Runtime.InteropServices;
+using System.Drawing.Imaging;
 using System.Text;
-using Patagames.Pdf;
-using Patagames.Pdf.Net;
-using Patagames.Pdf.Enums;
+using PdfiumViewer;
 
 namespace StatementOrganizer;
 
@@ -12,17 +9,44 @@ namespace StatementOrganizer;
 /// Local PDF rasterization / text extraction.
 ///
 /// Two backends:
-///   1. managed Patagames.Pdf (PDFium .NET SDK) — **default**; the native pdfium
-///      runtime ships inside the NuGet package (PtgPdfCore.runtime.{linux,osx,win}),
-///      so there is nothing to install on any platform.
+///   1. managed PDFium (Apache-2.0 `PdfiumViewer` wrapper + `bblanchon.PDFium`
+///      native runtime — open source, ships inside the NuGet packages) —
+///      **default**; there is nothing to install on Windows.
 ///   2. poppler-utils (pdftoppm / pdftotext) — opt-in via PDF_BACKEND=poppler
 ///      (used only when the tools are on PATH).
 ///
-/// The managed backend works on Linux, Windows and macOS with zero external
-/// dependencies, so the app runs even on a bare Windows machine.
+/// The managed backend is Windows-only (it renders through System.Drawing),
+/// so the app runs on a bare Windows machine with zero external dependencies;
+/// use PDF_BACKEND=poppler on other platforms.
 /// </summary>
 public static class PdfTools
 {
+    static PdfTools() => EnsureNativeResolved();
+
+    static void EnsureNativeResolved()
+    {
+        // The wrapper loads the native pdfium.dll via LoadLibrary; point it at
+        // the copy the bblanchon.PDFium package deployed (its own probing does
+        // not match the layout the package deploys for .NET Framework, and
+        // .NET Framework does not search those subfolders on its own).
+        // Architecture-matching copies come first so a wrong-bitness pdfium.dll
+        // at the app root is never loaded.
+        PdfiumResolver.Resolve += (s, e) =>
+        {
+            string dir = AppContext.BaseDirectory;
+            string preferred = IntPtr.Size == 8 ? "x64" : "x86";
+            var candidates = new[]
+            {
+                Path.Combine(dir, preferred, "pdfium.dll"),
+                Path.Combine(dir, "pdfium.dll"),
+                Path.Combine(dir, "runtimes", "win-x64", "native", "pdfium.dll"),
+                Path.Combine(dir, "runtimes", "win-x86", "native", "pdfium.dll"),
+            };
+            foreach (string p in candidates)
+                if (File.Exists(p)) { e.PdfiumFileName = p; return; }
+        };
+    }
+
     /// <summary>Set true to force the poppler backend (env PDF_BACKEND=poppler).
     /// Default is the managed PDFium backend, which is used unless poppler is
     /// requested *and* available.</summary>
@@ -74,46 +98,33 @@ public static class PdfTools
     static List<(string Name, byte[] Png)> RasterizeManaged(string pdfPath, int dpi, int maxPages)
     {
         var pages = new List<(string, byte[])>();
-        using var doc = PdfDocument.Load(pdfPath, null, null);
-        int count = Math.Min(doc.Pages.Count, maxPages);
+        using var doc = PdfDocument.Load(pdfPath, null);
+        int count = Math.Min(doc.PageCount, maxPages);
         for (int i = 0; i < count; i++)
         {
-            var pg = doc.Pages[i];
-            var sz = doc.GetPageSizeByIndex(i);
-            double scale = dpi / 72.0;
-            int w = Math.Max(1, (int)(sz.Width * scale));
-            int h = Math.Max(1, (int)(sz.Height * scale));
+            var sz = doc.PageSizes[i];
+            int w = Math.Max(1, (int)(sz.Width * dpi / 72.0));
+            int h = Math.Max(1, (int)(sz.Height * dpi / 72.0));
 
-            // The renderer draws on top of existing pixels, so the bitmap must be
-            // pre-filled with white (a fresh bitmap is transparent/black).
-            using var bmp = new PdfBitmap(w, h, true);
-            bmp.FillRect(0, 0, w, h, FS_COLOR.White);
-            pg.Render(bmp, 0, 0, w, h, PageRotate.Normal, RenderFlags.FPDF_NONE);
-
-            int stride = bmp.Stride;
-            var raw = new byte[h * stride];
-            Marshal.Copy(bmp.Buffer, raw, 0, raw.Length);
-
-            var rows = new MemoryStream();
-            for (int y = 0; y < h; y++)
-            {
-                rows.WriteByte(0); // PNG filter 0 (none)
-                rows.Write(raw, y * stride, stride);
-            }
-            pages.Add(($"page{i + 1}", PngWriter.Encode(rows.ToArray(), w, h)));
+            // The renderer pre-fills the bitmap with white and scales the page
+            // by dpi/72; since w/h above are the page size * dpi/72, the page
+            // fills the image exactly.
+            using var img = doc.Render(i, w, h, dpi, dpi, PdfRotation.Rotate0, PdfRenderFlags.None);
+            using var ms = new MemoryStream();
+            img.Save(ms, ImageFormat.Png);
+            pages.Add(($"page{i + 1}", ms.ToArray()));
         }
         return pages;
     }
 
     static string ExtractTextManaged(string pdfPath)
     {
-        using var doc = PdfDocument.Load(pdfPath, null, null);
+        using var doc = PdfDocument.Load(pdfPath, null);
         var sb = new StringBuilder();
-        for (int i = 0; i < doc.Pages.Count; i++)
+        for (int i = 0; i < doc.PageCount; i++)
         {
-            var text = doc.Pages[i].Text.GetText(0, doc.Pages[i].Text.CountChars);
-            sb.Append(text);
-            if (i < doc.Pages.Count - 1) sb.AppendLine();
+            sb.Append(doc.GetPdfText(i));
+            if (i < doc.PageCount - 1) sb.AppendLine();
         }
         var result = sb.ToString().Trim();
         if (string.IsNullOrWhiteSpace(result))
@@ -166,75 +177,4 @@ public static class PdfTools
     }
 
     static string Truncate(string s, int n) => string.IsNullOrEmpty(s) ? "" : (s.Length <= n ? s : s[..n] + "...");
-}
-
-/// <summary>
-/// Minimal PNG encoder (8-bit RGBA, no interlacing, filter 0 on every row).
-/// .NET's DeflateStream writes raw DEFLATE, so the zlib wrapper (0x78 0x9C
-/// header + Adler-32 trailer) is added manually.
-/// <paramref name="rows"/> = per row: 1 filter byte + stride bytes.
-/// </summary>
-public static class PngWriter
-{
-    public static byte[] Encode(byte[] rows, int width, int height)
-    {
-        // zlib-wrapped scanline data
-        using var idatMs = new MemoryStream();
-        using (var deflate = new DeflateStream(idatMs, CompressionLevel.Optimal, leaveOpen: true))
-            deflate.Write(rows);
-        var rawDeflate = idatMs.ToArray();
-        long adler = Adler32(rows);
-        var zlibPayload = new byte[rawDeflate.Length + 6];
-        zlibPayload[0] = 0x78; zlibPayload[1] = 0x9C;
-        Buffer.BlockCopy(rawDeflate, 0, zlibPayload, 2, rawDeflate.Length);
-        zlibPayload[^4] = (byte)(adler >> 24); zlibPayload[^3] = (byte)(adler >> 16);
-        zlibPayload[^2] = (byte)(adler >> 8);  zlibPayload[^1] = (byte)adler;
-
-        using var ms = new MemoryStream();
-        void W(byte[] b) => ms.Write(b, 0, b.Length);
-        void WBE32(int v) => W(new byte[] { (byte)(v >> 24), (byte)(v >> 16), (byte)(v >> 8), (byte)v });
-        void Chunk(string type, byte[] data)
-        {
-            WBE32(data.Length);
-            var tb = Encoding.ASCII.GetBytes(type);
-            W(tb); W(data);
-            WBE32((int)Crc32(tb.Concat(data).ToArray()));
-        }
-
-        W(new byte[] { 0x89, (byte)'P', (byte)'N', (byte)'G', 0x0D, 0x0A, 0x1A, 0x0A });
-        var ihdr = new byte[13];
-        for (int k = 0; k < 4; k++)
-        {
-            ihdr[k] = (byte)(width >> (24 - 8 * k));
-            ihdr[4 + k] = (byte)(height >> (24 - 8 * k));
-        }
-        ihdr[8] = 8; // bit depth
-        ihdr[9] = 6; // color type: RGBA
-        Chunk("IHDR", ihdr);
-        Chunk("IDAT", zlibPayload);
-        Chunk("IEND", Array.Empty<byte>());
-        return ms.ToArray();
-    }
-
-    static long Adler32(byte[] data)
-    {
-        uint a = 1, b = 0;
-        foreach (var x in data)
-        {
-            a = (a + x) % 65521;
-            b = (b + a) % 65521;
-        }
-        return (b << 16) | a;
-    }
-
-    static uint Crc32(byte[] data)
-    {
-        uint crc = 0xFFFFFFFF;
-        foreach (var b in data)
-        {
-            crc ^= b;
-            for (int i = 0; i < 8; i++) crc = (crc >> 1) ^ (0xEDB88320u & (uint)(-(crc & 1)));
-        }
-        return crc ^ 0xFFFFFFFF;
-    }
 }

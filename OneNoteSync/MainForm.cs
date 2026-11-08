@@ -1172,17 +1172,23 @@ public sealed class MainForm : Form
             Log("TEST page id: " + pageId);
             Log("TEST: generating a sample PNG (rasterizer sanity check) ...");
             int w = 640, hgt = 360;
-            byte[] px = new byte[w * hgt];
-            for (int y = 0; y < hgt; y++)
-                for (int x = 0; x < w; x++)
+            byte[] png;
+            using (var bmp = new System.Drawing.Bitmap(w, hgt, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+            using (var g = System.Drawing.Graphics.FromImage(bmp))
+            {
+                for (int y = 0; y < hgt; y++)
+                    for (int x = 0; x < w; x++)
+                    {
+                        bmp.SetPixel(x, y, System.Drawing.Color.FromArgb(255,
+                            x * 255 / w, y * 255 / hgt, 255 - x * 255 / w));
+                    }
+                g.DrawString("test", new System.Drawing.Font("Segoe UI", 16f), System.Drawing.Brushes.White, 12, 12);
+                using (var ms = new MemoryStream())
                 {
-                    int idx = y * w + x;
-                    px[idx * 4 + 0] = (byte)(x * 255 / w);
-                    px[idx * 4 + 1] = (byte)(y * 255 / hgt);
-                    px[idx * 4 + 2] = (byte)(255 - x * 255 / w);
-                    px[idx * 4 + 3] = 255;
+                    bmp.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
+                    png = ms.ToArray();
                 }
-            byte[] png = PngWriter.Encode(px, w, hgt);
+            }
             Log($"TEST generated {png.Length}-byte PNG");
             var sample = new PageXml.AccountRow
             {
@@ -1397,39 +1403,50 @@ public sealed class MainForm : Form
     private void SaveMappingFromGrid(bool silent = false)
     {
         var map = new OneMap();
-        // Default notebook: the combo's selection, or the previous value if nothing is picked yet.
-        map.DefaultNotebook = _cboDefaultNb.SelectedItem as string ?? _map.DefaultNotebook;
-
-        // Per-institution mapping from the TOP grid.
-        foreach (DataGridViewRow row in _mapGrid.Rows)
+        // Read the grids on the UI thread: this is called from the worker thread at the
+        // start of a run (and from the Save button on the UI thread). A blocking Invoke
+        // so the save below sees the freshly captured values (same pattern as SnapshotRunRows).
+        if (_log != null && _log.IsHandleCreated)
         {
-            string inst = row.Cells[_mapColInst.Index].Value?.ToString() ?? "";
-            if (inst.Length == 0) continue;
-            var opt = ResolveTarget(row.Cells[_mapColTarget.Index].Value);
-            if (opt != null)
+            Action fill = () =>
             {
-                string nb = row.Cells[_mapColNotebook.Index].Value?.ToString() ?? "";
-                map.Institutions[inst] = new MapEntry
+                // Default notebook: the combo's selection, or the previous value if nothing is picked yet.
+                map.DefaultNotebook = _cboDefaultNb.SelectedItem as string ?? _map.DefaultNotebook;
+
+                // Per-institution mapping from the TOP grid.
+                foreach (DataGridViewRow row in _mapGrid.Rows)
                 {
-                    Kind = opt.Kind,
-                    Name = opt.Name,
-                    Notebook = string.IsNullOrEmpty(nb) ? opt.Notebook : nb,
-                    Parent = opt.ParentName,
-                };
-            }
-        }
+                    string inst = row.Cells[_mapColInst.Index].Value?.ToString() ?? "";
+                    if (inst.Length == 0) continue;
+                    var opt = ResolveTarget(row.Cells[_mapColTarget.Index].Value);
+                    if (opt != null)
+                    {
+                        string nb = row.Cells[_mapColNotebook.Index].Value?.ToString() ?? "";
+                        map.Institutions[inst] = new MapEntry
+                        {
+                            Kind = opt.Kind,
+                            Name = opt.Name,
+                            Notebook = string.IsNullOrEmpty(nb) ? opt.Notebook : nb,
+                            Parent = opt.ParentName,
+                        };
+                    }
+                }
 
-        // Per-file settings from the BOTTOM grid.
-        foreach (DataGridViewRow row in _fileGrid.Rows)
-        {
-            string file = row.Cells[_colFile.Index].Value?.ToString() ?? "";
-            if (file.Length == 0) continue;
-            map.Files[file] = new FileSetting
-            {
-                Enabled = (bool)(row.Cells[_colEnabled.Index].Value ?? true),
-                Title = row.Cells[_colTitle.Index].Value?.ToString() ?? "",
-                Date = (bool)(row.Cells[_colDate.Index].Value ?? false),
+                // Per-file settings from the BOTTOM grid.
+                foreach (DataGridViewRow row in _fileGrid.Rows)
+                {
+                    string file = row.Cells[_colFile.Index].Value?.ToString() ?? "";
+                    if (file.Length == 0) continue;
+                    map.Files[file] = new FileSetting
+                    {
+                        Enabled = (bool)(row.Cells[_colEnabled.Index].Value ?? true),
+                        Title = row.Cells[_colTitle.Index].Value?.ToString() ?? "",
+                        Date = (bool)(row.Cells[_colDate.Index].Value ?? false),
+                    };
+                }
             };
+            if (_log.InvokeRequired) _log.Invoke(fill);
+            else fill();
         }
 
         try

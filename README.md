@@ -7,9 +7,12 @@ copies them into per-institution folders, and writes a structured JSON summary.
 ## Setup
 
 1. .NET 9 SDK (installed at `~/.dotnet`, already on PATH via `~/.bashrc`).
-   Nothing else to install — PDF reading uses the bundled PDFium engine by
-   default. (Optional: set `PDF_BACKEND=poppler` to prefer poppler-utils when
-   they are on `PATH`; the app falls back to PDFium if poppler is missing.)
+   Nothing else to install — PDF reading uses the bundled, open-source PDFium
+   engine (managed `PdfiumViewer` wrapper + `bblanchon.PDFium` native runtime,
+   both Apache-2.0, shipped via NuGet) by default. (Optional: set
+   `PDF_BACKEND=poppler` to prefer poppler-utils when they are on `PATH`; the
+   app falls back to PDFium if poppler is missing. On non-Windows platforms
+   the managed backend is unavailable, so use the poppler backend.)
 2. Put your key in the `.env` at the repo root (or set env vars, which win):
 
 ```
@@ -30,8 +33,10 @@ MAX_PAGES=20                           # vision backend: pages rasterized per PD
 > 3. **text** – text extraction (cheapest, fails on scanned PDFs)
 >
 > PDF rasterization/extraction uses the bundled **PDFium** engine by default
-> (`Patagames.Pdf` NuGet package — its native runtime ships inside the package
-> for Windows / macOS / Linux, so there is nothing to install). Optionally set
+> (managed `PdfiumViewer.Updated` NuGet package, Apache-2.0, rendering through
+> System.Drawing — Windows-only — plus the `bblanchon.PDFium` package, which
+> ships the pre-compiled Chromium `pdfium.dll`, also Apache-2.0 and updated
+> weekly; there is nothing to install). Optionally set
 > `PDF_BACKEND=poppler` in `.env` to use `pdftoppm` / `pdftotext` instead when
 > they are on `PATH` (used only if available, else it falls back to managed).
 > Both paths have been verified to produce identical results.

@@ -10,9 +10,8 @@ using System.Threading;
 using System.Windows.Forms;
 using System.Xml.Linq;
 using Microsoft.Office.Interop.OneNote;
-using Patagames.Pdf;
-using Patagames.Pdf.Net;
-using Patagames.Pdf.Enums;
+using System.Drawing.Imaging;
+using PdfiumViewer;
 
 namespace OneNoteXmlViewer
 {
@@ -39,6 +38,7 @@ namespace OneNoteXmlViewer
 
         public MainForm()
         {
+            EnsureNativeResolved();
             Text = "OneNote XML Viewer  (selectable PageInfo) + PDF Insert (pathSource) Test";
             StartPosition = FormStartPosition.CenterScreen;
             ClientSize = new Size(1160, 850);
@@ -460,29 +460,48 @@ namespace OneNoteXmlViewer
         }
 
         // ---------- PDF PAGE-IMAGE RASTERIZATION (PDFium) ----------
+
+        static void EnsureNativeResolved()
+        {
+            // The wrapper loads the native pdfium.dll via LoadLibrary; point it
+            // at the copy the bblanchon.PDFium package deployed. Architecture-
+            // matching copies come first so a wrong-bitness pdfium.dll at the
+            // app root is never loaded.
+            PdfiumResolver.Resolve += (s, e) =>
+            {
+                string dir = AppContext.BaseDirectory;
+                string preferred = IntPtr.Size == 8 ? "x64" : "x86";
+                var candidates = new[]
+                {
+                    Path.Combine(dir, preferred, "pdfium.dll"),
+                    Path.Combine(dir, "pdfium.dll"),
+                    Path.Combine(dir, "runtimes", "win-x64", "native", "pdfium.dll"),
+                    Path.Combine(dir, "runtimes", "win-x86", "native", "pdfium.dll"),
+                };
+                foreach (string p in candidates)
+                    if (File.Exists(p)) { e.PdfiumFileName = p; return; }
+            };
+        }
+
         List<(string Name, byte[] Png)> Rasterize(string pdfPath, int dpi, int maxPages)
         {
             var pages = new List<(string, byte[])>();
-            using (var doc = PdfDocument.Load(pdfPath, null, null))
+            using (var doc = PdfDocument.Load(pdfPath, null))
             {
-                int count = Math.Min(doc.Pages.Count, maxPages);
+                int count = Math.Min(doc.PageCount, maxPages);
                 for (int i = 0; i < count; i++)
                 {
-                    var pg = doc.Pages[i];
-                    var sz = doc.GetPageSizeByIndex(i);
-                    double scale = dpi / 72.0;
-                    int w = Math.Max(1, (int)(sz.Width * scale));
-                    int h = Math.Max(1, (int)(sz.Height * scale));
-                    using (var bmp = new PdfBitmap(w, h, true))
+                    var sz = doc.PageSizes[i];
+                    int w = Math.Max(1, (int)(sz.Width * dpi / 72.0));
+                    int h = Math.Max(1, (int)(sz.Height * dpi / 72.0));
+                    // The renderer pre-fills the bitmap with white and scales the
+                    // page by dpi/72; since w/h above are the page size * dpi/72,
+                    // the page fills the image exactly.
+                    using (var img = doc.Render(i, w, h, dpi, dpi, PdfRotation.Rotate0, PdfRenderFlags.None))
                     {
-                        bmp.FillRect(0, 0, w, h, FS_COLOR.White);
-                        pg.Render(bmp, 0, 0, w, h, PageRotate.Normal, RenderFlags.FPDF_NONE);
-                        int stride = bmp.Stride;
-                        var raw = new byte[h * stride];
-                        System.Runtime.InteropServices.Marshal.Copy(bmp.Buffer, raw, 0, raw.Length);
-                        var rows = new MemoryStream();
-                        for (int y = 0; y < h; y++) { rows.WriteByte(0); rows.Write(raw, y * stride, stride); }
-                        pages.Add(("page" + (i + 1), PngWriter.Encode(rows.ToArray(), w, h)));
+                        var ms = new MemoryStream();
+                        img.Save(ms, ImageFormat.Png);
+                        pages.Add(("page" + (i + 1), ms.ToArray()));
                     }
                 }
             }
@@ -509,45 +528,6 @@ namespace OneNoteXmlViewer
                 Log(string.Format("Rendered {0}: {1}x{2}px -> one:Size {3:F0}x{4:F0}pt  [{5}]", p.Name, pw, ph, w, h, file));
             }
             return result;
-        }
-
-        // ---------- PNG ENCODER (8-bit RGBA, filter 0) ----------
-        static class PngWriter
-        {
-            public static byte[] Encode(byte[] rows, int width, int height)
-            {
-                using var idatMs = new MemoryStream();
-                using (var deflate = new System.IO.Compression.DeflateStream(idatMs, System.IO.Compression.CompressionLevel.Optimal, leaveOpen: true))
-                    deflate.Write(rows, 0, rows.Length);
-                var rawDeflate = idatMs.ToArray();
-                long adler = Adler32(rows);
-                var zlibPayload = new byte[rawDeflate.Length + 6];
-                zlibPayload[0] = 0x78; zlibPayload[1] = 0x9C;
-                Buffer.BlockCopy(rawDeflate, 0, zlibPayload, 2, rawDeflate.Length);
-                zlibPayload[zlibPayload.Length - 4] = (byte)(adler >> 24); zlibPayload[zlibPayload.Length - 3] = (byte)(adler >> 16);
-                zlibPayload[zlibPayload.Length - 2] = (byte)(adler >> 8);  zlibPayload[zlibPayload.Length - 1] = (byte)adler;
-
-                using var ms = new MemoryStream();
-                void W(byte[] b) => ms.Write(b, 0, b.Length);
-                void WBE32(int v) { W(new byte[] { (byte)(v >> 24), (byte)(v >> 16), (byte)(v >> 8), (byte)v }); }
-                void Chunk(string type, byte[] data)
-                {
-                    WBE32(data.Length);
-                    var tb = System.Text.Encoding.ASCII.GetBytes(type);
-                    W(tb); W(data);
-                    WBE32((int)Crc32(tb.Concat(data).ToArray()));
-                }
-                W(new byte[] { 0x89, (byte)'P', (byte)'N', (byte)'G', 0x0D, 0x0A, 0x1A, 0x0A });
-                var ihdr = new byte[13];
-                for (int k = 0; k < 4; k++) { ihdr[k] = (byte)(width >> (24 - 8 * k)); ihdr[4 + k] = (byte)(height >> (24 - 8 * k)); }
-                ihdr[8] = 8; ihdr[9] = 6;
-                Chunk("IHDR", ihdr);
-                Chunk("IDAT", zlibPayload);
-                Chunk("IEND", Array.Empty<byte>());
-                return ms.ToArray();
-            }
-            static long Adler32(byte[] data) { uint a = 1, b = 0; foreach (var x in data) { a = (a + x) % 65521; b = (b + a) % 65521; } return (b << 16) | a; }
-            static uint Crc32(byte[] data) { uint crc = 0xFFFFFFFF; foreach (var b in data) { crc ^= b; for (int i = 0; i < 8; i++) crc = (crc >> 1) ^ (0xEDB88320u & (uint)(-(crc & 1))); } return crc ^ 0xFFFFFFFF; }
         }
 
         void ShowInsertXml()

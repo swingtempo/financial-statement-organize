@@ -51,7 +51,7 @@ var engine = PdfTools.PreferPoppler
 Console.WriteLine($"Backends: files (upload) -> vision ok -> text ok   [PDF engine: {engine}]");
 
 
-using var http = new HttpClient { BaseAddress = new Uri(baseUrl + "/") };
+using var http = new HttpClient { BaseAddress = new Uri(baseUrl + "/"), Timeout = TimeSpan.FromMinutes(5) };
 http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
 
 Console.WriteLine($"Model:  {model}");

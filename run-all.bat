@@ -28,7 +28,7 @@ if errorlevel 1 (
 
 echo.
 echo [2/3] Running StatementOrganizer  (seeding organized\statements.json)...
-StatementOrganizer\bin\Debug\net9.0\StatementOrganizer.exe
+StatementOrganizer\bin\Debug\net9.0-windows\StatementOrganizer.exe
 if errorlevel 1 (
     echo.
     echo StatementOrganizer FAILED - check the output above and the LLM_API_KEY in .env
